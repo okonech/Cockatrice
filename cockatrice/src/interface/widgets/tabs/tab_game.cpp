@@ -29,24 +29,36 @@
 
 #include <QAction>
 #include <QCompleter>
+#include <QDateTime>
 #include <QDebug>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QDir>
+#include <QFile>
+#include <QPointer>
+#include <QSharedPointer>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QTimer>
+#include <QTextStream>
 #include <QWidget>
 #include "../../../client/network/ai/ai_coach_client.h"
 #include <libcockatrice/card/database/card_database.h>
 #include <libcockatrice/card/database/card_database_manager.h>
 #include "../game/ai/ai_coach_state_exporter.h"
 #include <libcockatrice/network/client/abstract/abstract_client.h>
+#include <libcockatrice/protocol/pb/command_dump_zone.pb.h>
 #include <libcockatrice/protocol/pb/event_game_joined.pb.h>
 #include <libcockatrice/protocol/pb/game_replay.pb.h>
+#include <libcockatrice/protocol/pb/response_dump_zone.pb.h>
+#include <libcockatrice/protocol/pb/serverinfo_card.pb.h>
 #include <libcockatrice/protocol/pb/serverinfo_player.pb.h>
 #include <libcockatrice/protocol/pb/serverinfo_user.pb.h>
+#include <libcockatrice/protocol/pending_command.h>
 #include <libcockatrice/utility/string_limits.h>
 
 TabGame::TabGame(TabSupervisor *_tabSupervisor, GameReplay *_replay)
@@ -543,11 +555,42 @@ void TabGame::actAiCoachRecommend()
         return;
     }
 
-    const QString prompt = AiCoachStateExporter::buildPromptText(game, perspectivePlayer);
+    const QString messageHistoryText = messageLog ? messageLog->toPlainText() : QString();
+
+    QPointer<Player> perspectivePlayerPtr(perspectivePlayer);
+
+    const QString appDataDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    const QString logFilePath = appDataDir.isEmpty() ? QString() : QDir(appDataDir).filePath("ai_coach_last_request.log");
+    if (!appDataDir.isEmpty()) {
+        QDir().mkpath(appDataDir);
+    }
+
+    if (!logFilePath.isEmpty()) {
+        qInfo().noquote() << "AI Coach: trace log path:" << logFilePath;
+    } else {
+        qWarning() << "AI Coach: could not determine trace log path (AppLocalDataLocation empty)";
+    }
+
+    const auto writeAiCoachLog = [logFilePath](const QString &text, bool append) {
+        if (logFilePath.isEmpty()) {
+            return;
+        }
+
+        QFile f(logFilePath);
+        QIODevice::OpenMode mode = QIODevice::WriteOnly | QIODevice::Text;
+        mode |= append ? QIODevice::Append : QIODevice::Truncate;
+        if (!f.open(mode)) {
+            qWarning().noquote() << "AI Coach: failed to open trace log for writing:" << logFilePath;
+            return;
+        }
+
+        QTextStream out(&f);
+        out << text;
+    };
 
     auto *dlg = new DlgAiCoach(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose, true);
-    dlg->setStatusText(tr("Requesting recommendation…"));
+    dlg->setStatusText(tr("Preparing game state…"));
     dlg->show();
     dlg->raise();
     dlg->activateWindow();
@@ -556,31 +599,234 @@ void TabGame::actAiCoachRecommend()
         aAiCoachRecommend->setEnabled(false);
     }
 
-    auto *client = new AiCoachClient(this);
     QPointer<DlgAiCoach> dlgPtr(dlg);
 
-    connect(client, &AiCoachClient::recommendationReady, this, [this, dlgPtr, client](const QString &text) {
+    auto zoneCardOverrides = QSharedPointer<AiCoachStateExporter::ZoneCardOverrides>(
+        new AiCoachStateExporter::ZoneCardOverrides());
+    auto pendingZoneDumps = QSharedPointer<int>(new int(0));
+    auto anyDumpFailed = QSharedPointer<bool>(new bool(false));
+    auto startedLlm = QSharedPointer<bool>(new bool(false));
+    auto allZoneDumpRequestsIssued = QSharedPointer<bool>(new bool(false));
+
+    const auto startLlmRequest = [this,
+                                 dlgPtr,
+                                 perspectivePlayerPtr,
+                                 messageHistoryText,
+                                 writeAiCoachLog,
+                                 logFilePath,
+                                 zoneCardOverrides,
+                                 anyDumpFailed]() {
+        if (!game || !game->getGameState() || !game->getPlayerManager()) {
+            return;
+        }
+        if (!perspectivePlayerPtr) {
+            if (dlgPtr) {
+                dlgPtr->setResultText(tr("Error: local player is no longer available."));
+            }
+            if (aAiCoachRecommend) {
+                aAiCoachRecommend->setEnabled(true);
+            }
+            return;
+        }
+
+        if (*anyDumpFailed) {
+            qWarning() << "AI Coach: one or more zone dumps failed/empty; continuing with best-effort overrides.";
+        }
+
+        // Trace what we managed to fetch before building the prompt.
+        QString prefetchSummary;
+        prefetchSummary += QString("=== AI Coach Prefetch (%1) ===\n")
+                               .arg(QDateTime::currentDateTime().toString(Qt::ISODate));
+        prefetchSummary += QString("Dumped zones: %1\n")
+                               .arg(zoneCardOverrides->isEmpty() ? QStringLiteral("(none)")
+                                                               : QString::number(zoneCardOverrides->size()));
+        for (auto it = zoneCardOverrides->cbegin(); it != zoneCardOverrides->cend(); ++it) {
+            prefetchSummary += QString("- %1: %2 card(s)\n").arg(it.key()).arg(it.value().size());
+        }
+        if (*anyDumpFailed) {
+            prefetchSummary += QString("Warning: one or more dumps failed/empty or timed out.\n");
+        }
+        prefetchSummary += QString("\n");
+        writeAiCoachLog(prefetchSummary, false);
+
+        const QString prompt = AiCoachStateExporter::buildPromptText(
+            game, perspectivePlayerPtr, messageHistoryText, *zoneCardOverrides);
+
+        writeAiCoachLog(QString("=== AI Coach Request (%1) ===\n")
+                           .arg(QDateTime::currentDateTime().toString(Qt::ISODate))
+                           + QString("\n--- INPUT PROMPT ---\n")
+                           + prompt
+                           + QString("\n"),
+                       true);
+
+        qInfo() << "AI Coach: request prepared (prompt chars:" << prompt.size() << ")";
         if (dlgPtr) {
-            dlgPtr->setResultText(text);
+            dlgPtr->setStatusText(tr("Requesting recommendation…"));
         }
-        if (aAiCoachRecommend) {
-            aAiCoachRecommend->setEnabled(true);
+
+        auto *client = new AiCoachClient(this);
+
+        QSharedPointer<QElapsedTimer> requestTimer(new QElapsedTimer());
+        requestTimer->start();
+        qInfo() << "AI Coach: sending request…";
+
+        connect(client,
+                &AiCoachClient::recommendationReady,
+                this,
+                [this, dlgPtr, client, writeAiCoachLog, requestTimer, logFilePath](const QString &text) {
+                    if (requestTimer) {
+                        qInfo().noquote()
+                            << QStringLiteral("AI Coach: response received in %1 ms").arg(requestTimer->elapsed());
+                    }
+                    if (!logFilePath.isEmpty()) {
+                        qInfo().noquote() << "AI Coach: appended output to" << logFilePath;
+                    }
+                    writeAiCoachLog(QString("\n--- OUTPUT ---\n") + text + QString("\n"), true);
+                    if (dlgPtr) {
+                        dlgPtr->setResultText(text);
+                    }
+                    if (aAiCoachRecommend) {
+                        aAiCoachRecommend->setEnabled(true);
+                    }
+                    client->deleteLater();
+                });
+        connect(client,
+                &AiCoachClient::recommendationError,
+                this,
+                [this, dlgPtr, client, writeAiCoachLog, requestTimer, logFilePath](const QString &message) {
+                    if (requestTimer) {
+                        qInfo().noquote()
+                            << QStringLiteral("AI Coach: error received in %1 ms").arg(requestTimer->elapsed());
+                    }
+                    if (!logFilePath.isEmpty()) {
+                        qInfo().noquote() << "AI Coach: appended error to" << logFilePath;
+                    }
+                    writeAiCoachLog(QString("\n--- ERROR ---\n") + message + QString("\n"), true);
+                    if (dlgPtr) {
+                        dlgPtr->setResultText(tr("Error: %1").arg(message));
+                    } else {
+                        QMessageBox::warning(this, tr("AI Coach"), message);
+                    }
+                    if (aAiCoachRecommend) {
+                        aAiCoachRecommend->setEnabled(true);
+                    }
+                    client->deleteLater();
+                });
+
+        client->requestRecommendation(prompt);
+    };
+
+    const auto maybeStart = [pendingZoneDumps, startedLlm, allZoneDumpRequestsIssued, startLlmRequest]() {
+        if (!*allZoneDumpRequestsIssued) {
+            return;
         }
-        client->deleteLater();
-    });
-    connect(client, &AiCoachClient::recommendationError, this, [this, dlgPtr, client](const QString &message) {
+        if (*pendingZoneDumps <= 0 && !*startedLlm) {
+            *startedLlm = true;
+            startLlmRequest();
+        }
+    };
+
+    const auto requestZoneDump = [this,
+                                  perspectivePlayerPtr,
+                                  dlgPtr,
+                                  pendingZoneDumps,
+                                  anyDumpFailed,
+                                  zoneCardOverrides,
+                                  maybeStart](const QString &zoneName) {
+        if (!perspectivePlayerPtr || !perspectivePlayerPtr->getPlayerInfo() || !perspectivePlayerPtr->getPlayerActions()) {
+            *anyDumpFailed = true;
+            maybeStart();
+            return;
+        }
+
+        (*pendingZoneDumps)++;
+
+        qInfo().noquote() << "AI Coach: dump_zone request" << zoneName << "for player"
+                          << perspectivePlayerPtr->getPlayerInfo()->getId();
+
+        Command_DumpZone cmd;
+        cmd.set_player_id(perspectivePlayerPtr->getPlayerInfo()->getId());
+        cmd.set_zone_name(zoneName.toStdString());
+        cmd.set_number_cards(-1);
+        cmd.set_is_reversed(false);
+
+        PendingCommand *pend = perspectivePlayerPtr->getPlayerActions()->prepareGameCommand(cmd);
+        connect(pend,
+                &PendingCommand::finished,
+                this,
+                [zoneName, pendingZoneDumps, anyDumpFailed, zoneCardOverrides, maybeStart](const Response &r) {
+                    QList<AiCoachStateExporter::DumpedCard> dumped;
+
+                    if (r.has_response_code() && r.response_code() != Response::RespOk) {
+                        qWarning().noquote() << "AI Coach: dump_zone failed for" << zoneName
+                                             << "response_code=" << r.response_code();
+                        *anyDumpFailed = true;
+                    }
+
+                    const Response_DumpZone &resp = r.GetExtension(Response_DumpZone::ext);
+                    const QString canonicalZoneName = resp.has_zone_info()
+                                                          ? QString::fromStdString(resp.zone_info().name())
+                                                          : QString();
+                    const int respCardListSize = resp.zone_info().card_list_size();
+                    dumped.reserve(respCardListSize);
+                    for (int i = 0; i < respCardListSize; ++i) {
+                        const ServerInfo_Card &cardInfo = resp.zone_info().card_list(i);
+                        AiCoachStateExporter::DumpedCard c;
+                        c.id = cardInfo.id();
+                        c.name = QString::fromStdString(cardInfo.name());
+                        c.providerId = QString::fromStdString(cardInfo.provider_id());
+                        dumped.append(c);
+                    }
+
+                    if (dumped.isEmpty()) {
+                        *anyDumpFailed = true;
+                    }
+
+                    qInfo().noquote() << "AI Coach: dump_zone response" << zoneName
+                                      << "canonical="
+                                      << (canonicalZoneName.isEmpty() ? QStringLiteral("(none)") : canonicalZoneName)
+                                      << "cards=" << dumped.size();
+
+                    // Store under both the requested name and the canonical name returned by the server.
+                    zoneCardOverrides->insert(zoneName, dumped);
+                    if (!canonicalZoneName.isEmpty() && canonicalZoneName != zoneName) {
+                        zoneCardOverrides->insert(canonicalZoneName, dumped);
+                    }
+
+                    (*pendingZoneDumps)--;
+                    maybeStart();
+                });
+
+        perspectivePlayerPtr->getPlayerActions()->sendGameCommand(pend);
         if (dlgPtr) {
-            dlgPtr->setResultText(tr("Error: %1").arg(message));
-        } else {
-            QMessageBox::warning(this, tr("AI Coach"), message);
+            dlgPtr->setStatusText(tr("Fetching zone info (%1)…").arg(zoneName));
         }
-        if (aAiCoachRecommend) {
-            aAiCoachRecommend->setEnabled(true);
+    };
+
+    // Prefetch hidden zones via the same dump-zone mechanism used by the zone popup.
+    // This is needed because hidden zones often contain placeholder CardItem entries until dumped.
+    qInfo() << "AI Coach: requesting zone dumps for deck and sideboard…";
+    requestZoneDump(QStringLiteral("deck"));
+    requestZoneDump(QStringLiteral("sb"));
+    *allZoneDumpRequestsIssued = true;
+    maybeStart();
+
+    // Safety: if dump responses never arrive, proceed after a short timeout.
+    QTimer::singleShot(3000, this, [pendingZoneDumps, anyDumpFailed, allZoneDumpRequestsIssued, maybeStart]() {
+        if (*pendingZoneDumps > 0) {
+            qWarning() << "AI Coach: zone dump timeout; continuing without complete overrides.";
+            *anyDumpFailed = true;
+            *pendingZoneDumps = 0;
+            *allZoneDumpRequestsIssued = true;
+            maybeStart();
         }
-        client->deleteLater();
     });
 
-    client->requestRecommendation(prompt);
+    // If dumps couldn't be requested, continue immediately.
+    if (*pendingZoneDumps == 0) {
+        *allZoneDumpRequestsIssued = true;
+        maybeStart();
+    }
 }
 
 /**

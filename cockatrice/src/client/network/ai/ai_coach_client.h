@@ -1,6 +1,7 @@
 #ifndef COCKATRICE_AI_COACH_CLIENT_H
 #define COCKATRICE_AI_COACH_CLIENT_H
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QUrl>
 
@@ -39,6 +40,7 @@ private slots:
 
 private:
     QNetworkAccessManager *nam;
+    QElapsedTimer requestTimer;
 };
 
 #endif // COCKATRICE_AI_COACH_CLIENT_H

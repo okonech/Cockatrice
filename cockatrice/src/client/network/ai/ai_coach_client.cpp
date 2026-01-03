@@ -2,6 +2,7 @@
 
 #include "dotenv_loader.h"
 
+#include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -111,6 +112,9 @@ void AiCoachClient::requestRecommendation(const QString &promptText)
         return;
     }
 
+    qInfo().noquote() << "AiCoachClient: preparing request (endpoint=" << cfg.endpoint.toString() << ", model=" << cfg.model
+                      << ", promptChars=" << promptText.size() << ")";
+
     QNetworkRequest req(cfg.endpoint);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("api-key", cfg.apiKey.toUtf8());
@@ -123,17 +127,26 @@ void AiCoachClient::requestRecommendation(const QString &promptText)
     payload.insert("max_output_tokens", 700);
 
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-    nam->post(req, body);
+
+    requestTimer.start();
+    QNetworkReply *reply = nam->post(req, body);
+    qInfo() << "AiCoachClient: POST sent (bytes:" << body.size() << ", reply=" << reply << ")";
 }
 
 void AiCoachClient::onReplyFinished(QNetworkReply *reply)
 {
+    const QVariant statusAttr = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+    const int httpStatus = statusAttr.isValid() ? statusAttr.toInt() : -1;
+    const qint64 elapsedMs = requestTimer.isValid() ? requestTimer.elapsed() : -1;
+
     const QByteArray bytes = reply->readAll();
 
     QJsonParseError parseError{};
     const QJsonDocument doc = QJsonDocument::fromJson(bytes, &parseError);
 
     if (reply->error() != QNetworkReply::NoError) {
+        qInfo() << "AiCoachClient: reply finished with network error (httpStatus:" << httpStatus
+                << ", elapsedMs:" << elapsedMs << ", error:" << reply->error() << ")";
         QString msg = reply->errorString();
         if (doc.isObject()) {
             const QString apiMsg = extractErrorMessage(doc.object());
@@ -145,6 +158,9 @@ void AiCoachClient::onReplyFinished(QNetworkReply *reply)
         emit recommendationError(msg);
         return;
     }
+
+    qInfo() << "AiCoachClient: reply finished (httpStatus:" << httpStatus << ", elapsedMs:" << elapsedMs
+            << ", bytes:" << bytes.size() << ")";
 
     if (!doc.isObject()) {
         reply->deleteLater();
