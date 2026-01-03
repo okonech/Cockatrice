@@ -180,7 +180,12 @@ AiCoachClient::Config AiCoachClient::loadConfig(QString *errorMessage)
     }
     if (cfg.apiKey.isEmpty()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("Missing COCKATRICE_AI_API_KEY (set it in .env)");
+            const QString envPath = DotenvLoader::loadedFilePath();
+            if (!envPath.isEmpty()) {
+                *errorMessage = QStringLiteral("Missing COCKATRICE_AI_API_KEY (set it in %1)").arg(envPath);
+            } else {
+                *errorMessage = QStringLiteral("Missing COCKATRICE_AI_API_KEY (set it in a .env file)");
+            }
         }
         return {};
     }
