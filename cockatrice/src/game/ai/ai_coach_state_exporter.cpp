@@ -29,7 +29,7 @@ struct MulliganPhaseInfo
 {
     bool isInitialMulliganPhase = false;
     int newHandEvents = 0;
-    int recommendedKeepSize = 7;
+    int keepSize = 7;
 };
 
 QString zoneNameForOutput(const QString &rawZoneName)
@@ -131,7 +131,7 @@ MulliganPhaseInfo analyzeMulliganPhase(const QString &messageHistoryText)
     // - N=3 => 2 mulligans, keep 6
     // - N=4 => 3 mulligans, keep 5
     const int keepPenalty = qMax(0, info.newHandEvents - 2);
-    info.recommendedKeepSize = 7 - keepPenalty;
+    info.keepSize = qBound(1, 7 - keepPenalty, 7);
 
     return info;
 }
@@ -516,7 +516,9 @@ QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
     QJsonObject mulliganObj;
     mulliganObj.insert("is_initial_mulligan_phase", mulligan.isInitialMulliganPhase);
     mulliganObj.insert("new_hand_events", mulligan.newHandEvents);
-    mulliganObj.insert("commander_recommended_keep_size", mulligan.recommendedKeepSize);
+    // Commander mulligan keep size after accounting for the free mulligan.
+    // This is the number of cards the player must keep if this is a mulligan decision.
+    mulliganObj.insert("keep_size", mulligan.keepSize);
     root.insert("mulligan", mulliganObj);
 
     QJsonArray players;
@@ -558,12 +560,27 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     QString prompt;
     prompt += "You are an expert Magic: The Gathering cEDH (competitive Commander) goldfishing coach.\n";
     prompt += "Analyze the Cockatrice game state JSON below and provide strategic guidance for the perspective player.\n";
-    prompt += "This is GOLDFISHING (solitaire practice), so there are no opponents to interact with—focus on speed and consistency.\n\n";
+    prompt += "This is GOLDFISHING (solitaire practice), but we will use realistic cEDH assumptions to approximate a real pod.\n";
+    prompt += "Assume opponents exist, interaction is likely, and sequencing a protected win is preferable to an unprotected win.\n\n";
+
+    prompt += "=== GOLDFISH ASSUMPTIONS (Use for Evaluation) ===\n";
+    prompt += "When giving recommendations, apply these simplifying assumptions unless the JSON contradicts them:\n";
+    prompt += "- Plan as if you have opponents and will need to respect interaction; prioritize protected wins when possible.\n";
+    prompt += "- Dockside Extortionist: assume it makes 3 Treasures in the first 3 turns of the game, then 4 Treasures after that.\n";
+    prompt += "- Mystic Remora: assume it draws 3 cards on T1, 2 cards on T2, and 1 card each turn after that while it remains on the battlefield.\n";
+    prompt += "- Rhystic Study: assume it draws 3 cards on T1, 2 cards on T2-T4, and 1 card each turn after that while it remains on the battlefield.\n";
+    prompt += "- Ragavan, Nimble Pilferer and Praetor's Grasp: assume they can generate value because opponents have similar wincons and staples as our deck (treat the opponent pool as a typical cEDH pod).\n\n";
 
     prompt += "=== CRITICAL: CARD KNOWLEDGE ===\n";
     prompt += "If you encounter a card you do not recognize or are uncertain about, explicitly say:\n";
     prompt += "  \"I am not familiar with [Card Name]. Please provide its Oracle text.\"\n";
     prompt += "DO NOT guess or hallucinate card abilities. Accuracy is paramount.\n\n";
+
+    prompt += "=== CRITICAL: MANA COSTS / COLORS ===\n";
+    prompt += "The JSON includes card database fields (e.g., \"Mana Cost\", \"Type\", \"Text\").\n";
+    prompt += "- Treat the provided \"Mana Cost\" as authoritative; DO NOT invent or modify mana costs or color identities.\n";
+    prompt += "- Use the provided mana symbols exactly for mana math and color requirements.\n";
+    prompt += "- Symbol reminder: U = Blue, B = Black, R = Red, G = Green, W = White.\n\n";
 
     prompt += "=== RULES / LEGALITY ===\n";
     prompt += "Do not recommend illegal actions. Respect timing restrictions, costs, and rules text.\n";
@@ -580,10 +597,11 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     prompt += "=== COMMANDER MULLIGAN RULES (Goldfishing) ===\n";
     prompt += "- 1 free mulligan (draw 7, keep 7).\n";
     prompt += "- After that: draw 7, keep one fewer each time (2nd mull => keep 6, 3rd => keep 5, etc.).\n";
-    prompt += QString("- Heuristic hints: is_initial_mulligan_phase=%1, new_hand_events=%2, recommended_keep_size=%3.\n\n")
+    prompt += "- Keep size sequence: 7, 7, 6, 5, 4, 3, 2, 1 …\n";
+    prompt += QString("- Mulligan info: is_initial_mulligan_phase=%1, new_hand_events=%2, keep_size=%3 (authoritative).\n\n")
                   .arg(mulligan.isInitialMulliganPhase ? QStringLiteral("true") : QStringLiteral("false"))
                   .arg(mulligan.newHandEvents)
-                  .arg(mulligan.recommendedKeepSize);
+                  .arg(mulligan.keepSize);
 
     prompt += "=== MODE SELECTION (IMPORTANT) ===\n";
     prompt += "First, decide which mode applies and state it explicitly:\n";
@@ -598,7 +616,11 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     prompt += "3) Card advantage/selection: can you find missing pieces (tutors/draw/wheels)?\n";
     prompt += "4) Win access: do you have a clear win attempt or tutors toward one?\n";
     prompt += "5) Commander synergy: does the hand leverage commanders as part of the plan?\n";
-    prompt += "Then decide KEEP or MULLIGAN and explain what the hand is working toward (mana development, card advantage, win attempt, etc.).\n\n";
+    prompt += "Then decide KEEP or MULLIGAN and explain what the hand is working toward (mana development, card advantage, win attempt, etc.).\n";
+    prompt += "\n";
+    prompt += "IMPORTANT: The JSON field mulligan.keep_size is NOT optional.\n";
+    prompt += "- If you KEEP, you must choose EXACTLY keep_size cards from the current Hand to keep, and the other (7-keep_size) cards are put on the bottom.\n";
+    prompt += "- As keep_size gets smaller, be less picky: at keep_size<=4, prioritize ANY functional development (making land drops, casting an engine/tutor/accelerant) over an ideal win-attempt hand.\n\n";
 
     prompt += "=== PLAY MODE: SEQUENCING FRAMEWORK ===\n";
     prompt += "Determine the optimal line using:\n";
@@ -613,6 +635,7 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     prompt += "- Hand analysis: mana sources; acceleration; card advantage; win access; commander synergy\n";
     prompt += "- Decision: KEEP or MULLIGAN\n";
     prompt += "- Reasoning: careful explanation of why, and what the plan is working toward\n";
+    prompt += "- If KEEP: explicitly list KEEP (exactly keep_size cards) and BOTTOM (the other cards)\n";
     prompt += "- If KEEP: first 1-2 turns plan (with mana math)\n";
     prompt += "- If MULLIGAN: what to look for next hand\n";
     prompt += "- Alternatives: only if there is a plausible keep line\n";
