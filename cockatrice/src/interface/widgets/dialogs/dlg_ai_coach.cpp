@@ -5,6 +5,7 @@
 #include <QDialogButtonBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QTextCursor>
 #include <QVBoxLayout>
 
 DlgAiCoach::DlgAiCoach(QWidget *parent) : QDialog(parent), textEdit(new QPlainTextEdit(this))
@@ -40,6 +41,18 @@ void DlgAiCoach::setStatusText(const QString &text)
 void DlgAiCoach::setResultText(const QString &text)
 {
     textEdit->setPlainText(text);
+}
+
+void DlgAiCoach::appendResultDelta(const QString &delta)
+{
+    if (delta.isEmpty()) {
+        return;
+    }
+    QTextCursor cursor = textEdit->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(delta);
+    textEdit->setTextCursor(cursor);
+    textEdit->ensureCursorVisible();
 }
 
 void DlgAiCoach::copyToClipboard()

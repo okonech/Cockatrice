@@ -607,6 +607,7 @@ void TabGame::actAiCoachRecommend()
     auto anyDumpFailed = QSharedPointer<bool>(new bool(false));
     auto startedLlm = QSharedPointer<bool>(new bool(false));
     auto allZoneDumpRequestsIssued = QSharedPointer<bool>(new bool(false));
+    auto sawAnyDelta = QSharedPointer<bool>(new bool(false));
 
     const auto startLlmRequest = [this,
                                  dlgPtr,
@@ -615,7 +616,8 @@ void TabGame::actAiCoachRecommend()
                                  writeAiCoachLog,
                                  logFilePath,
                                  zoneCardOverrides,
-                                 anyDumpFailed]() {
+                                 anyDumpFailed,
+                                 sawAnyDelta]() {
         if (!game || !game->getGameState() || !game->getPlayerManager()) {
             return;
         }
@@ -633,31 +635,30 @@ void TabGame::actAiCoachRecommend()
             qWarning() << "AI Coach: one or more zone dumps failed/empty; continuing with best-effort overrides.";
         }
 
-        // Trace what we managed to fetch before building the prompt.
-        QString prefetchSummary;
-        prefetchSummary += QString("=== AI Coach Prefetch (%1) ===\n")
-                               .arg(QDateTime::currentDateTime().toString(Qt::ISODate));
-        prefetchSummary += QString("Dumped zones: %1\n")
-                               .arg(zoneCardOverrides->isEmpty() ? QStringLiteral("(none)")
-                                                               : QString::number(zoneCardOverrides->size()));
-        for (auto it = zoneCardOverrides->cbegin(); it != zoneCardOverrides->cend(); ++it) {
-            prefetchSummary += QString("- %1: %2 card(s)\n").arg(it.key()).arg(it.value().size());
-        }
-        if (*anyDumpFailed) {
-            prefetchSummary += QString("Warning: one or more dumps failed/empty or timed out.\n");
-        }
-        prefetchSummary += QString("\n");
-        writeAiCoachLog(prefetchSummary, false);
-
         const QString prompt = AiCoachStateExporter::buildPromptText(
             game, perspectivePlayerPtr, messageHistoryText, *zoneCardOverrides);
 
-        writeAiCoachLog(QString("=== AI Coach Request (%1) ===\n")
-                           .arg(QDateTime::currentDateTime().toString(Qt::ISODate))
-                           + QString("\n--- INPUT PROMPT ---\n")
-                           + prompt
-                           + QString("\n"),
-                       true);
+        // Trace log: write exactly once for the full prompt (truncate/overwrite).
+        // Keep the prefetch summary + prompt together so we only touch the log file once before the request.
+        QString promptLog;
+        promptLog += QString("=== AI Coach Prefetch (%1) ===\n")
+                         .arg(QDateTime::currentDateTime().toString(Qt::ISODate));
+        promptLog += QString("Dumped zones: %1\n")
+                         .arg(zoneCardOverrides->isEmpty() ? QStringLiteral("(none)")
+                                                         : QString::number(zoneCardOverrides->size()));
+        for (auto it = zoneCardOverrides->cbegin(); it != zoneCardOverrides->cend(); ++it) {
+            promptLog += QString("- %1: %2 card(s)\n").arg(it.key()).arg(it.value().size());
+        }
+        if (*anyDumpFailed) {
+            promptLog += QString("Warning: one or more dumps failed/empty or timed out.\n");
+        }
+        promptLog += QString("\n");
+        promptLog += QString("=== AI Coach Request (%1) ===\n")
+                         .arg(QDateTime::currentDateTime().toString(Qt::ISODate));
+        promptLog += QString("\n--- INPUT PROMPT ---\n");
+        promptLog += prompt;
+        promptLog += QString("\n");
+        writeAiCoachLog(promptLog, false);
 
         qInfo() << "AI Coach: request prepared (prompt chars:" << prompt.size() << ")";
         if (dlgPtr) {
@@ -669,6 +670,21 @@ void TabGame::actAiCoachRecommend()
         QSharedPointer<QElapsedTimer> requestTimer(new QElapsedTimer());
         requestTimer->start();
         qInfo() << "AI Coach: sending request…";
+
+        connect(client,
+                &AiCoachClient::recommendationDelta,
+                this,
+                [dlgPtr, sawAnyDelta](const QString &delta) {
+                    if (!dlgPtr) {
+                        return;
+                    }
+                    if (!*sawAnyDelta) {
+                        *sawAnyDelta = true;
+                        dlgPtr->setStatusText(DlgAiCoach::tr("Streaming response…"));
+                        dlgPtr->setResultText(QString());
+                    }
+                    dlgPtr->appendResultDelta(delta);
+                });
 
         connect(client,
                 &AiCoachClient::recommendationReady,

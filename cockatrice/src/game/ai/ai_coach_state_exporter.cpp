@@ -9,6 +9,9 @@
 #include "../zones/logic/card_zone_logic.h"
 #include "../board/card_item.h"
 
+#include <libcockatrice/card/card_info.h>
+#include <libcockatrice/card/database/card_database_manager.h>
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -28,6 +31,37 @@ struct MulliganPhaseInfo
     int newHandEvents = 0;
     int recommendedKeepSize = 7;
 };
+
+QString zoneNameForOutput(const QString &rawZoneName)
+{
+    if (rawZoneName == QStringLiteral("deck")) {
+        return QStringLiteral("Library");
+    }
+    if (rawZoneName == QStringLiteral("table")) {
+        return QStringLiteral("Battlefield");
+    }
+    if (rawZoneName == QStringLiteral("hand")) {
+        return QStringLiteral("Hand");
+    }
+    if (rawZoneName == QStringLiteral("grave")) {
+        return QStringLiteral("Graveyard");
+    }
+    if (rawZoneName == QStringLiteral("rfg")) {
+        return QStringLiteral("Exile");
+    }
+    if (rawZoneName == QStringLiteral("sb")) {
+        return QStringLiteral("Command Zone");
+    }
+    if (rawZoneName == QStringLiteral("stack")) {
+        return QStringLiteral("Stack");
+    }
+    return rawZoneName;
+}
+
+bool isBattlefieldZone(const QString &rawZoneName)
+{
+    return rawZoneName == QStringLiteral("table");
+}
 
 MulliganPhaseInfo analyzeMulliganPhase(const QString &messageHistoryText)
 {
@@ -152,27 +186,18 @@ QJsonObject exportCard(const CardItem *card)
     return obj;
 }
 
-QJsonObject exportDumpedCard(const AiCoachStateExporter::DumpedCard &card)
+QJsonObject exportZoneValue(const CardZoneLogic *zone,
+                            bool includeCardsEvenIfHidden,
+                            const QList<AiCoachStateExporter::DumpedCard> *overrideCards)
 {
     QJsonObject obj;
-    obj.insert("id", card.id);
-    obj.insert("name", card.name);
-    obj.insert("provider_id", card.providerId);
-    return obj;
-}
-
-QJsonObject exportZone(const CardZoneLogic *zone,
-                       bool includeCardsEvenIfHidden,
-                       const QList<AiCoachStateExporter::DumpedCard> *overrideCards)
-{
-    QJsonObject obj;
-    obj.insert("name", zone->getName());
+    const QString rawZoneName = zone->getName();
+    const bool battlefield = isBattlefieldZone(rawZoneName);
 
     // For goldfishing/local games, we want the LLM to see full zone contents even if the UI considers the
     // zone hidden. Since AI Coach is only enabled for local games, this is safe and is essential for
     // opening hand and line planning.
     const bool contentsKnownForExport = includeCardsEvenIfHidden ? true : zone->contentsKnown();
-    obj.insert("contents_known", contentsKnownForExport);
 
     const CardList &cards = zone->getCards();
     const int effectiveCount = (overrideCards != nullptr) ? overrideCards->size() : cards.size();
@@ -180,13 +205,19 @@ QJsonObject exportZone(const CardZoneLogic *zone,
 
     if (contentsKnownForExport) {
         QJsonArray cardArray;
-        if (overrideCards != nullptr) {
-            for (const auto &c : *overrideCards) {
-                cardArray.append(exportDumpedCard(c));
-            }
-        } else {
+        if (battlefield) {
             for (const CardItem *card : cards) {
                 cardArray.append(exportCard(card));
+            }
+        } else {
+            if (overrideCards != nullptr) {
+                for (const auto &c : *overrideCards) {
+                    cardArray.append(c.name);
+                }
+            } else {
+                for (const CardItem *card : cards) {
+                    cardArray.append(card->getName());
+                }
             }
         }
         obj.insert("cards", cardArray);
@@ -195,9 +226,19 @@ QJsonObject exportZone(const CardZoneLogic *zone,
     return obj;
 }
 
-QJsonObject exportPlayerCounters(Player *player)
+struct ExportedPlayerResources
 {
-    QJsonObject obj;
+    QJsonObject floatingMana;
+    QJsonObject otherCounters;
+    bool hasLife = false;
+    int life = 0;
+    bool hasStorm = false;
+    int storm = 0;
+};
+
+ExportedPlayerResources exportPlayerResources(Player *player)
+{
+    ExportedPlayerResources out;
 
     const QMap<int, AbstractCounter *> counters = player->getCounters();
     for (auto it = counters.cbegin(); it != counters.cend(); ++it) {
@@ -205,19 +246,56 @@ QJsonObject exportPlayerCounters(Player *player)
         if (!counter) {
             continue;
         }
+
         const QString rawName = counter->getName();
-        const QString displayName = TranslateCounterName::getDisplayName(rawName);
+        const int value = counter->getValue();
 
-        QJsonObject c;
-        c.insert("id", it.key());
-        c.insert("name", rawName);
-        c.insert("display_name", displayName);
-        c.insert("value", counter->getValue());
+        if (rawName == QStringLiteral("life")) {
+            out.hasLife = true;
+            out.life = value;
+            continue;
+        }
+        if (rawName == QStringLiteral("storm")) {
+            out.hasStorm = true;
+            out.storm = value;
+            continue;
+        }
 
-        obj.insert(rawName, c);
+        const bool isFloatingMana = (rawName == QStringLiteral("w") || rawName == QStringLiteral("u") ||
+                                    rawName == QStringLiteral("b") || rawName == QStringLiteral("r") ||
+                                    rawName == QStringLiteral("g") || rawName == QStringLiteral("x"));
+        if (isFloatingMana) {
+            QString key = TranslateCounterName::getDisplayName(rawName);
+            if (key.isEmpty() || key == QStringLiteral("Other")) {
+                key = rawName;
+            }
+            if (!key.isEmpty()) {
+                key[0] = key[0].toUpper();
+            }
+            if (!key.isEmpty()) {
+                out.floatingMana.insert(key, value);
+            }
+            continue;
+        }
+
+        QString key = TranslateCounterName::getDisplayName(rawName);
+        if (key.isEmpty() || key == QStringLiteral("Other")) {
+            key = rawName;
+        }
+        if (!key.isEmpty()) {
+            key[0] = key[0].toUpper();
+        }
+        if (!key.isEmpty()) {
+            // Avoid collisions; fall back to raw name if needed.
+            if (out.otherCounters.contains(key) && !rawName.isEmpty()) {
+                out.otherCounters.insert(rawName, value);
+            } else {
+                out.otherCounters.insert(key, value);
+            }
+        }
     }
 
-    return obj;
+    return out;
 }
 
 QJsonObject exportPlayer(AbstractGame *game,
@@ -231,10 +309,20 @@ QJsonObject exportPlayer(AbstractGame *game,
     obj.insert("is_perspective", isPerspective);
     obj.insert("is_local", player->getPlayerInfo()->getLocalOrJudge());
 
-    // Counters include mana counters (w/u/b/r/g/x) and life.
-    obj.insert("counters", exportPlayerCounters(player));
+    // Export a simplified view that is easy for the LLM to reason about.
+    const ExportedPlayerResources resources = exportPlayerResources(player);
+    obj.insert("floating_mana", resources.floatingMana);
+    if (resources.hasLife) {
+        obj.insert("life", resources.life);
+    }
+    if (resources.hasStorm) {
+        obj.insert("storm", resources.storm);
+    }
+    if (!resources.otherCounters.isEmpty()) {
+        obj.insert("other_counters", resources.otherCounters);
+    }
 
-    QJsonArray zones;
+    QJsonObject zones;
 
     const bool isLocalGame = (game && game->getGameState() && game->getGameState()->getIsLocalGame());
     const bool includeHiddenZones = isLocalGame && isPerspective;
@@ -242,6 +330,7 @@ QJsonObject exportPlayer(AbstractGame *game,
     const auto &zoneMap = player->getZones();
     for (auto it = zoneMap.cbegin(); it != zoneMap.cend(); ++it) {
         const QString zoneName = it.key();
+        const QString outputZoneName = zoneNameForOutput(zoneName);
         const CardZoneLogic *zone = it.value();
         if (!zone) {
             continue;
@@ -252,16 +341,100 @@ QJsonObject exportPlayer(AbstractGame *game,
             const auto overrideIt = zoneCardOverrides.constFind(zoneName);
             if (overrideIt != zoneCardOverrides.constEnd()) {
                 overrideCards = &overrideIt.value();
+            } else {
+                // If the caller stored overrides under a human-friendly renamed zone name,
+                // accept that too.
+                const auto renamedIt = zoneCardOverrides.constFind(outputZoneName);
+                if (renamedIt != zoneCardOverrides.constEnd()) {
+                    overrideCards = &renamedIt.value();
+                }
             }
         }
 
         // Respect visibility for non-local games; in goldfishing/local games include full card lists for the
         // perspective player across all zones (deck/library, sideboard/command proxy, etc.).
-        zones.append(exportZone(zone, includeHiddenZones, overrideCards));
+        zones.insert(outputZoneName, exportZoneValue(zone, includeHiddenZones, overrideCards));
     }
     obj.insert("zones", zones);
 
     Q_UNUSED(game);
+    return obj;
+}
+
+QJsonObject exportTurnContext(const QString &messageHistoryText)
+{
+    QJsonObject obj;
+
+    const QStringList lines = messageHistoryText.split('\n');
+
+    static const QRegularExpression turnStartRe(
+        QStringLiteral("^(Player\\s+\\d+)'s\\s+turn\\.?$"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    int lastTurnLineIndex = -1;
+    QString currentTurnPlayer;
+
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString stripped = stripTimestampPrefix(lines[i]);
+        const QRegularExpressionMatch m = turnStartRe.match(stripped);
+        if (m.hasMatch()) {
+            lastTurnLineIndex = i;
+            currentTurnPlayer = m.captured(1);
+        }
+    }
+
+    if (lastTurnLineIndex < 0 || currentTurnPlayer.isEmpty()) {
+        obj.insert("current_turn_player", QString());
+        obj.insert("current_turn_log_text", QString());
+        obj.insert("land_drop_made", false);
+        obj.insert("land_drop_cards", QJsonArray());
+        return obj;
+    }
+
+    obj.insert("current_turn_player", currentTurnPlayer);
+
+    QStringList turnLines;
+    turnLines.reserve(qMax(0, lines.size() - (lastTurnLineIndex + 1)));
+    for (int i = lastTurnLineIndex + 1; i < lines.size(); ++i) {
+        const QString stripped = stripTimestampPrefix(lines[i]);
+        if (!stripped.isEmpty()) {
+            turnLines.append(stripped);
+        }
+    }
+    obj.insert("current_turn_log_text", turnLines.join('\n'));
+
+    const QRegularExpression landDropRe(
+        QStringLiteral("^%1\\s+puts\\s+(.+)\\s+into\\s+play\\s+from\\s+their\\s+hand\\.?$")
+            .arg(QRegularExpression::escape(currentTurnPlayer)),
+        QRegularExpression::CaseInsensitiveOption);
+
+    auto isLandCardName = [](const QString &cardName) -> bool {
+        auto *q = CardDatabaseManager::query();
+        if (!q) {
+            return false;
+        }
+        const CardInfoPtr info = q->getCardInfo(cardName);
+        if (!info) {
+            return false;
+        }
+        const QString typeLine = info->getCardType();
+        return typeLine.contains(QStringLiteral("Land"), Qt::CaseInsensitive);
+    };
+
+    QJsonArray landDropCards;
+    for (const QString &line : turnLines) {
+        const QRegularExpressionMatch m = landDropRe.match(line);
+        if (m.hasMatch()) {
+            const QString playedName = m.captured(1).trimmed();
+            if (isLandCardName(playedName)) {
+                landDropCards.append(playedName);
+            }
+        }
+    }
+
+    obj.insert("land_drop_cards", landDropCards);
+    obj.insert("land_drop_made", !landDropCards.isEmpty());
+
     return obj;
 }
 } // namespace
@@ -302,6 +475,9 @@ QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
     }
     root.insert("message_history_text", history);
     root.insert("message_history_truncated", truncated);
+
+    // Derived helpers from the message log to make turn/land-drop reasoning easier.
+    root.insert("turn_context", exportTurnContext(history));
 
     const MulliganPhaseInfo mulligan = analyzeMulliganPhase(history);
     QJsonObject mulliganObj;
@@ -344,36 +520,78 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
 
     const MulliganPhaseInfo mulligan = analyzeMulliganPhase(messageHistoryText);
 
-    // Keep this prompt short and very explicit; the JSON is the important payload.
+    // Prompt engineering for GPT 5.2 / Azure OpenAI Responses API.
+    // Structured to elicit careful reasoning about mulligan decisions and play sequencing.
     QString prompt;
-    prompt += "You are an expert Magic: The Gathering Commander goldfishing coach.\n";
-    prompt += "Given the following Cockatrice game state JSON, recommend the best next play sequence for the perspective player.\n";
-    prompt += "Prioritize deterministic lines and maximizing chance to win; if info is missing, state assumptions.\n\n";
+    prompt += "You are an expert Magic: The Gathering cEDH (competitive Commander) goldfishing coach.\n";
+    prompt += "Analyze the Cockatrice game state JSON below and provide strategic guidance for the perspective player.\n";
+    prompt += "This is GOLDFISHING (solitaire practice), so there are no opponents to interact with—focus on speed and consistency.\n\n";
 
-    prompt += "Important: The JSON includes message_history_text (the in-game log).\n";
-    prompt += "If the message history contains only startup/mulligan actions such as:\n";
-    prompt += "- The game has started\n";
-    prompt += "- Player N's turn / phase labels (e.g. Untap)\n";
-    prompt += "- looking at sideboard\n";
-    prompt += "- setting counters (including Life and mana counters like Blue/White/etc)\n";
-    prompt += "- \"shuffles their deck and draws a new hand of 7 card(s)\" (possibly repeated)\n";
-    prompt += "and there are no other actions, then treat this as the initial mulliganing phase.\n";
-    prompt += "In that case, your primary task is: decide whether to keep the current hand and how to proceed.\n";
-    prompt += "Commander mulligan rule (goldfishing): 1 free mulligan. After that, you always draw 7 but keep one fewer each time.\n";
-    prompt += "Examples: 1 mulligan => keep 7; 2 mulligans => keep 6; 3 mulligans => keep 5.\n";
-    if (mulligan.isInitialMulliganPhase) {
-        prompt += QString("Heuristic: message history suggests mulligan phase with %1 new-hand event(s); keep size would be %2.\n\n")
-                      .arg(mulligan.newHandEvents)
-                      .arg(mulligan.recommendedKeepSize);
-    } else {
-        prompt += "\n";
-    }
-    prompt += "Output format:\n";
-    prompt += "1) Recommended line (bullet steps)\n";
-    prompt += "2) Why this line\n";
-    prompt += "3) Alternative line(s)\n";
-    prompt += "4) Key risks / missing info\n\n";
-    prompt += "Game state JSON:\n";
+    prompt += "=== CRITICAL: CARD KNOWLEDGE ===\n";
+    prompt += "If you encounter a card you do not recognize or are uncertain about, explicitly say:\n";
+    prompt += "  \"I am not familiar with [Card Name]. Please provide its Oracle text.\"\n";
+    prompt += "DO NOT guess or hallucinate card abilities. Accuracy is paramount.\n\n";
+
+    prompt += "=== RULES / LEGALITY ===\n";
+    prompt += "Do not recommend illegal actions. Respect timing restrictions, costs, and rules text.\n";
+    prompt += "If the legality depends on missing info (e.g., commander tax, cards' Oracle text, whether a permanent is untapped, etc.), call it out and ask.\n";
+    prompt += "Only use information present in the JSON; do not assume extra cards, mana sources, or effects not shown.\n\n";
+
+    prompt += "=== GAME LOG INTERPRETATION ===\n";
+    prompt += "The JSON includes message_history_text (the in-game log).\n";
+    prompt += "- \"Player N's turn.\" marks a turn boundary.\n";
+    prompt += "- \"Player N puts <Card> into play from their hand.\" indicates a land drop.\n";
+    prompt += "- Startup lines (game started, phase labels, looking at sideboard, setting counters, shuffles/draws) are mulligan context.\n";
+    prompt += "- If only startup/mulligan lines exist, treat this as the MULLIGAN DECISION phase.\n\n";
+
+    prompt += "=== COMMANDER MULLIGAN RULES (Goldfishing) ===\n";
+    prompt += "- 1 free mulligan (draw 7, keep 7).\n";
+    prompt += "- After that: draw 7, keep one fewer each time (2nd mull => keep 6, 3rd => keep 5, etc.).\n";
+    prompt += QString("- Heuristic hints: is_initial_mulligan_phase=%1, new_hand_events=%2, recommended_keep_size=%3.\n\n")
+                  .arg(mulligan.isInitialMulliganPhase ? QStringLiteral("true") : QStringLiteral("false"))
+                  .arg(mulligan.newHandEvents)
+                  .arg(mulligan.recommendedKeepSize);
+
+    prompt += "=== MODE SELECTION (IMPORTANT) ===\n";
+    prompt += "First, decide which mode applies and state it explicitly:\n";
+    prompt += "- **MULLIGAN MODE** if we're still deciding to keep an opening hand (even if the heuristic is wrong).\n";
+    prompt += "- **PLAY MODE** if the game has progressed and we are sequencing plays.\n";
+    prompt += "Use the heuristic plus sanity checks (battlefield empty, only startup actions in log, etc.).\n\n";
+
+    prompt += "=== MULLIGAN MODE: EVALUATION FRAMEWORK ===\n";
+    prompt += "Evaluate the hand using these criteria (priority order for cEDH goldfishing):\n";
+    prompt += "1) Mana sources (lands + fast mana/rituals): do you have at least one reliable way to cast spells?\n";
+    prompt += "2) Early acceleration: can you do something meaningful on T1-T2?\n";
+    prompt += "3) Card advantage/selection: can you find missing pieces (tutors/draw/wheels)?\n";
+    prompt += "4) Win access: do you have a clear win attempt or tutors toward one?\n";
+    prompt += "5) Commander synergy: does the hand leverage commanders as part of the plan?\n";
+    prompt += "Then decide KEEP or MULLIGAN and explain what the hand is working toward (mana development, card advantage, win attempt, etc.).\n\n";
+
+    prompt += "=== PLAY MODE: SEQUENCING FRAMEWORK ===\n";
+    prompt += "Determine the optimal line using:\n";
+    prompt += "1) Immediate goal this turn (develop mana / draw / tutor / win).\n";
+    prompt += "2) Resource assessment (lands, rocks, floating mana, storm, hand).\n";
+    prompt += "3) Sequencing: order matters (land drop, rocks, draw, tutors).\n";
+    prompt += "4) Win attempt: if a win line exists, write it step-by-step with exact mana accounting.\n";
+    prompt += "5) If no win line now: best setup for next turn.\n\n";
+
+    prompt += "=== OUTPUT FORMAT (USE ONLY THE CHOSEN MODE) ===\n";
+    prompt += "If **MULLIGAN MODE**:\n";
+    prompt += "- Hand analysis: mana sources; acceleration; card advantage; win access; commander synergy\n";
+    prompt += "- Decision: KEEP or MULLIGAN\n";
+    prompt += "- Reasoning: careful explanation of why, and what the plan is working toward\n";
+    prompt += "- If KEEP: first 1-2 turns plan (with mana math)\n";
+    prompt += "- If MULLIGAN: what to look for next hand\n";
+    prompt += "- Alternatives: only if there is a plausible keep line\n";
+    prompt += "- Key risks / missing info\n\n";
+    prompt += "If **PLAY MODE**:\n";
+    prompt += "- Situation assessment (turn/phase/resources/hand/board)\n";
+    prompt += "- Recommended line: numbered steps with mana spent/remaining\n";
+    prompt += "- Goal: what the line accomplishes\n";
+    prompt += "- Alternative line(s) and why\n";
+    prompt += "- Key risks / missing info\n\n";
+
+    prompt += "=== GAME STATE JSON ===\n";
     prompt += json;
 
     return prompt;

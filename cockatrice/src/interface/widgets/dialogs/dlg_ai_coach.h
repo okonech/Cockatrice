@@ -14,6 +14,7 @@ public:
 
     void setStatusText(const QString &text);
     void setResultText(const QString &text);
+    void appendResultDelta(const QString &delta);
 
 private slots:
     void copyToClipboard();

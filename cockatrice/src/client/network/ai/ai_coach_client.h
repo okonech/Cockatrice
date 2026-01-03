@@ -32,11 +32,10 @@ public:
     void requestRecommendation(const QString &promptText);
 
 signals:
+    // Emitted for streaming responses as incremental text is received.
+    void recommendationDelta(const QString &delta);
     void recommendationReady(const QString &text);
     void recommendationError(const QString &message);
-
-private slots:
-    void onReplyFinished(QNetworkReply *reply);
 
 private:
     QNetworkAccessManager *nam;
