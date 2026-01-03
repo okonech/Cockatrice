@@ -83,6 +83,9 @@ private:
     TearOffMenu *phasesMenu;
     QAction *aGameInfo, *aConcede, *aLeaveGame, *aNextPhase, *aNextPhaseAction, *aNextTurn, *aReverseTurn,
         *aRemoveLocalArrows, *aRotateViewCW, *aRotateViewCCW, *aResetLayout, *aResetReplayLayout;
+    QAction *aAiCoachRecommend;
+    QAction *aCardInfoDockVisible, *aCardInfoDockFloating, *aMessageLayoutDockVisible, *aMessageLayoutDockFloating,
+        *aPlayerListDockVisible, *aPlayerListDockFloating, *aReplayDockVisible, *aReplayDockFloating;
     QAction *aFocusChat;
     QList<QAction *> phaseActions;
     QAction *aCardMenu;
@@ -153,6 +156,8 @@ private slots:
     void actPhaseAction();
     void actNextPhase();
     void actNextPhaseAction();
+
+    void actAiCoachRecommend();
 
     void addMentionTag(const QString &value);
     void linkCardToChat(const QString &cardName);

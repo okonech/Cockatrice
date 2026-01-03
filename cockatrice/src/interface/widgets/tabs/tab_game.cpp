@@ -18,6 +18,7 @@
 #include "../game_graphics/player/player_list_widget.h"
 #include "../interface/card_picture_loader/card_picture_loader.h"
 #include "../interface/widgets/cards/card_info_frame_widget.h"
+#include "../interface/widgets/dialogs/dlg_ai_coach.h"
 #include "../interface/widgets/dialogs/dlg_create_game.h"
 #include "../interface/widgets/server/user/user_list_manager.h"
 #include "../interface/widgets/utility/line_edit_completer.h"
@@ -37,8 +38,10 @@
 #include <QStackedWidget>
 #include <QTimer>
 #include <QWidget>
+#include "../../../client/network/ai/ai_coach_client.h"
 #include <libcockatrice/card/database/card_database.h>
 #include <libcockatrice/card/database/card_database_manager.h>
+#include "../game/ai/ai_coach_state_exporter.h"
 #include <libcockatrice/network/client/abstract/abstract_client.h>
 #include <libcockatrice/protocol/pb/event_game_joined.pb.h>
 #include <libcockatrice/protocol/pb/game_replay.pb.h>
@@ -131,7 +134,6 @@ TabGame::TabGame(TabSupervisor *_tabSupervisor,
     for (int i = game->getGameMetaInfo()->gameTypesSize() - 1; i >= 0; i--) {
         gameTypes.append(game->getGameMetaInfo()->findRoomGameType(i));
     }
-
     QTimer::singleShot(0, this, &TabGame::loadLayout);
 }
 
@@ -339,6 +341,10 @@ void TabGame::retranslateUi()
     if (aFocusChat) {
         aFocusChat->setText(tr("&Focus Chat"));
     }
+    if (aAiCoachRecommend) {
+        aAiCoachRecommend->setText(tr("AI Coach: Recommend Next Play…"));
+        aAiCoachRecommend->setEnabled(game->getGameState() && game->getGameState()->getIsLocalGame());
+    }
     if (sayLabel) {
         sayLabel->setText(tr("&Say:"));
     }
@@ -454,6 +460,9 @@ void TabGame::refreshShortcuts()
     if (aFocusChat) {
         aFocusChat->setShortcuts(shortcuts.getShortcut("Player/aFocusChat"));
     }
+    if (aAiCoachRecommend) {
+        aAiCoachRecommend->setShortcuts(shortcuts.getShortcut("Player/aAiCoachRecommend"));
+    }
 }
 
 bool TabGame::closeRequest()
@@ -509,6 +518,69 @@ void TabGame::actConcede()
         }
         emit game->getPlayerManager()->activeLocalPlayerUnconceded();
     }
+}
+
+void TabGame::actAiCoachRecommend()
+{
+    if (!game || !game->getGameState() || !game->getPlayerManager()) {
+        QMessageBox::warning(this, tr("AI Coach"), tr("Game state is not available."));
+        return;
+    }
+
+    if (!game->getGameState()->getIsLocalGame()) {
+        QMessageBox::information(this,
+                                 tr("AI Coach"),
+                                 tr("AI Coach is currently only enabled for local games (goldfishing)."));
+        return;
+    }
+
+    Player *perspectivePlayer = game->getPlayerManager()->getActiveLocalPlayer(game->getGameState()->getActivePlayer());
+    if (!perspectivePlayer) {
+        perspectivePlayer = game->getPlayerManager()->getPlayer(game->getPlayerManager()->getLocalPlayerId());
+    }
+    if (!perspectivePlayer) {
+        QMessageBox::warning(this, tr("AI Coach"), tr("Could not determine the local player."));
+        return;
+    }
+
+    const QString prompt = AiCoachStateExporter::buildPromptText(game, perspectivePlayer);
+
+    auto *dlg = new DlgAiCoach(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose, true);
+    dlg->setStatusText(tr("Requesting recommendation…"));
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
+
+    if (aAiCoachRecommend) {
+        aAiCoachRecommend->setEnabled(false);
+    }
+
+    auto *client = new AiCoachClient(this);
+    QPointer<DlgAiCoach> dlgPtr(dlg);
+
+    connect(client, &AiCoachClient::recommendationReady, this, [this, dlgPtr, client](const QString &text) {
+        if (dlgPtr) {
+            dlgPtr->setResultText(text);
+        }
+        if (aAiCoachRecommend) {
+            aAiCoachRecommend->setEnabled(true);
+        }
+        client->deleteLater();
+    });
+    connect(client, &AiCoachClient::recommendationError, this, [this, dlgPtr, client](const QString &message) {
+        if (dlgPtr) {
+            dlgPtr->setResultText(tr("Error: %1").arg(message));
+        } else {
+            QMessageBox::warning(this, tr("AI Coach"), message);
+        }
+        if (aAiCoachRecommend) {
+            aAiCoachRecommend->setEnabled(true);
+        }
+        client->deleteLater();
+    });
+
+    client->requestRecommendation(prompt);
 }
 
 /**
@@ -990,6 +1062,10 @@ void TabGame::createMenuItems()
     aFocusChat = new QAction(this);
     connect(aFocusChat, &QAction::triggered, sayEdit, qOverload<>(&LineEditCompleter::setFocus));
 
+    aAiCoachRecommend = new QAction(this);
+    connect(aAiCoachRecommend, &QAction::triggered, this, &TabGame::actAiCoachRecommend);
+    aAiCoachRecommend->setEnabled(game->getGameState() && game->getGameState()->getIsLocalGame());
+
     phasesMenu = new TearOffMenu(this);
 
     for (int i = 0; i < phasesToolbar->phaseCount(); ++i) {
@@ -1016,6 +1092,7 @@ void TabGame::createMenuItems()
     gameMenu->addAction(aGameInfo);
     gameMenu->addAction(aConcede);
     gameMenu->addAction(aFocusChat);
+    gameMenu->addAction(aAiCoachRecommend);
     gameMenu->addAction(aLeaveGame);
 
     gameMenu->addSeparator();
@@ -1038,6 +1115,7 @@ void TabGame::createReplayMenuItems()
     aGameInfo = nullptr;
     aConcede = nullptr;
     aFocusChat = nullptr;
+    aAiCoachRecommend = nullptr;
     aLeaveGame = new QAction(this);
     connect(aLeaveGame, &QAction::triggered, this, &TabGame::closeRequest);
 

@@ -7,7 +7,9 @@ project(Cockatrice VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${
 set(cockatrice_SOURCES
     ${VERSION_STRING_CPP}
     # sort by alphabetical order, so that there is no debate about where to add new sources to the list
-    src/client/network/connection_controller/remote_connection_controller.cpp
+  src/client/network/ai/ai_coach_client.cpp
+  src/client/network/ai/dotenv_loader.cpp
+  src/client/network/connection_controller/remote_connection_controller.cpp
     src/client/network/update/client/update_downloader.cpp
     src/client/network/interfaces/deck_stats_interface.cpp
     src/client/network/interfaces/tapped_out_interface.cpp
@@ -24,6 +26,7 @@ set(cockatrice_SOURCES
     src/interface/deck_loader/deck_file_format.cpp
     src/interface/deck_loader/deck_loader.cpp
     src/interface/deck_loader/loaded_deck.cpp
+    src/interface/widgets/dialogs/dlg_ai_coach.cpp
     src/interface/widgets/dialogs/dlg_connect.cpp
     src/interface/widgets/dialogs/dlg_convert_deck_to_cod_format.cpp
     src/interface/widgets/dialogs/dlg_create_game.cpp
@@ -56,6 +59,7 @@ set(cockatrice_SOURCES
     src/filters/filter_tree_model.cpp
     src/filters/syntax_help.cpp
     src/game/abstract_game.cpp
+    src/game/ai/ai_coach_state_exporter.cpp
     src/game/arrow_registry.cpp
     src/game_graphics/board/abstract_card_drag_item.cpp
     src/game_graphics/board/abstract_card_item.cpp
