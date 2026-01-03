@@ -140,12 +140,26 @@ QJsonObject exportCard(const CardItem *card)
 {
     QJsonObject obj;
 
-    obj.insert("id", card->getId());
-    obj.insert("name", card->getName());
-    obj.insert("provider_id", card->getProviderId());
+    const QString cardName = card->getName();
+
+    // Card database fields (for rules accuracy).
+    obj.insert("name", cardName);
+    {
+        auto *q = CardDatabaseManager::query();
+        const CardInfoPtr info = q ? q->getCardInfo(cardName) : CardInfoPtr();
+        if (info) {
+            obj.insert("Mana Cost", info->getManaCost());
+            obj.insert("Type", info->getCardType());
+            obj.insert("Text", info->getText());
+        } else {
+            obj.insert("unknown_card", true);
+            obj.insert("Mana Cost", QJsonValue());
+            obj.insert("Type", QJsonValue());
+            obj.insert("Text", QJsonValue());
+        }
+    }
+
     obj.insert("tapped", card->getTapped());
-    obj.insert("face_down", card->getFaceDown());
-    obj.insert("attacking", card->getAttacking());
 
     if (!card->getAnnotation().isEmpty()) {
         obj.insert("annotation", card->getAnnotation());
@@ -169,7 +183,6 @@ QJsonObject exportCard(const CardItem *card)
         QJsonArray attached;
         for (const CardItem *a : card->getAttachedCards()) {
             QJsonObject ref;
-            ref.insert("id", a->getId());
             ref.insert("name", a->getName());
             attached.append(ref);
         }
@@ -178,11 +191,31 @@ QJsonObject exportCard(const CardItem *card)
 
     if (card->getAttachedTo()) {
         QJsonObject ref;
-        ref.insert("id", card->getAttachedTo()->getId());
         ref.insert("name", card->getAttachedTo()->getName());
         obj.insert("attached_to", ref);
     }
 
+    return obj;
+}
+
+QJsonObject exportCardInfoOnly(const QString &cardName)
+{
+    QJsonObject obj;
+    obj.insert("name", cardName);
+
+    auto *q = CardDatabaseManager::query();
+    const CardInfoPtr info = q ? q->getCardInfo(cardName) : CardInfoPtr();
+    if (!info) {
+        obj.insert("unknown_card", true);
+        obj.insert("Mana Cost", QJsonValue());
+        obj.insert("Type", QJsonValue());
+        obj.insert("Text", QJsonValue());
+        return obj;
+    }
+
+    obj.insert("Mana Cost", info->getManaCost());
+    obj.insert("Type", info->getCardType());
+    obj.insert("Text", info->getText());
     return obj;
 }
 
@@ -212,11 +245,11 @@ QJsonObject exportZoneValue(const CardZoneLogic *zone,
         } else {
             if (overrideCards != nullptr) {
                 for (const auto &c : *overrideCards) {
-                    cardArray.append(c.name);
+                    cardArray.append(exportCardInfoOnly(c.name));
                 }
             } else {
                 for (const CardItem *card : cards) {
-                    cardArray.append(card->getName());
+                    cardArray.append(exportCardInfoOnly(card->getName()));
                 }
             }
         }

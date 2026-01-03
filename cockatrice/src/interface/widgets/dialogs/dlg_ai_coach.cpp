@@ -5,6 +5,7 @@
 #include <QDialogButtonBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTextCursor>
 #include <QVBoxLayout>
 
@@ -48,11 +49,25 @@ void DlgAiCoach::appendResultDelta(const QString &delta)
     if (delta.isEmpty()) {
         return;
     }
-    QTextCursor cursor = textEdit->textCursor();
+
+    QScrollBar *sb = textEdit->verticalScrollBar();
+    const int oldValue = sb ? sb->value() : 0;
+    const int oldMax = sb ? sb->maximum() : 0;
+
+    // Only auto-scroll while streaming if the user is already at (or very near) the bottom.
+    const bool wasAtBottom = sb ? ((oldMax - oldValue) <= 2) : true;
+
+    QTextCursor cursor(textEdit->document());
     cursor.movePosition(QTextCursor::End);
     cursor.insertText(delta);
-    textEdit->setTextCursor(cursor);
-    textEdit->ensureCursorVisible();
+
+    if (sb) {
+        if (wasAtBottom) {
+            sb->setValue(sb->maximum());
+        } else {
+            sb->setValue(oldValue);
+        }
+    }
 }
 
 void DlgAiCoach::copyToClipboard()
