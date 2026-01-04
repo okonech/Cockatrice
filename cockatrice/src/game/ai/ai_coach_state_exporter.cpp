@@ -142,21 +142,23 @@ QJsonObject exportCard(const CardItem *card)
 
     const QString cardName = card->getName();
 
-    // Card database fields (for rules accuracy).
-    obj.insert("name", cardName);
+    CardInfoPtr info;
     {
         auto *q = CardDatabaseManager::query();
-        const CardInfoPtr info = q ? q->getCardInfo(cardName) : CardInfoPtr();
-        if (info) {
-            obj.insert("Mana Cost", info->getManaCost());
-            obj.insert("Type", info->getCardType());
-            obj.insert("Text", info->getText());
-        } else {
-            obj.insert("unknown_card", true);
-            obj.insert("Mana Cost", QJsonValue());
-            obj.insert("Type", QJsonValue());
-            obj.insert("Text", QJsonValue());
-        }
+        info = q ? q->getCardInfo(cardName) : CardInfoPtr();
+    }
+
+    // Card database fields (for rules accuracy).
+    obj.insert("name", cardName);
+    if (info) {
+        obj.insert("Mana Cost", info->getManaCost());
+        obj.insert("Type", info->getCardType());
+        obj.insert("Text", info->getText());
+    } else {
+        obj.insert("unknown_card", true);
+        obj.insert("Mana Cost", QJsonValue());
+        obj.insert("Type", QJsonValue());
+        obj.insert("Text", QJsonValue());
     }
 
     obj.insert("tapped", card->getTapped());
@@ -165,7 +167,13 @@ QJsonObject exportCard(const CardItem *card)
         obj.insert("annotation", card->getAnnotation());
     }
     if (!card->getPT().isEmpty()) {
-        obj.insert("pt", card->getPT());
+        bool isCreature = false;
+        if (info) {
+            isCreature = info->getCardType().contains("Creature", Qt::CaseInsensitive);
+        }
+        if (isCreature) {
+            obj.insert("pt", card->getPT());
+        }
     }
 
     if (!card->getCounters().isEmpty()) {
@@ -331,6 +339,42 @@ ExportedPlayerResources exportPlayerResources(Player *player)
     return out;
 }
 
+QJsonObject computePlayerState(Player *player)
+{
+    QJsonObject state;
+    int treasureCount = 0;
+    QStringList untappedLands;
+    QStringList untappedArtifacts;
+
+    const CardZoneLogic *table = player->getZones().value("table");
+    if (table) {
+        for (const CardItem *card : table->getCards()) {
+            if (card->getName() == "Treasure") {
+                treasureCount++;
+            }
+
+            if (!card->getTapped()) {
+                auto *q = CardDatabaseManager::query();
+                const CardInfoPtr info = q ? q->getCardInfo(card->getName()) : CardInfoPtr();
+                if (info) {
+                    const QString type = info->getCardType();
+                    if (type.contains("Land", Qt::CaseInsensitive)) {
+                        untappedLands.append(card->getName());
+                    } else if (type.contains("Artifact", Qt::CaseInsensitive)) {
+                        untappedArtifacts.append(card->getName());
+                    }
+                }
+            }
+        }
+    }
+
+    state.insert("treasure_count", treasureCount);
+    state.insert("untapped_lands", QJsonArray::fromStringList(untappedLands));
+    state.insert("untapped_artifacts", QJsonArray::fromStringList(untappedArtifacts));
+
+    return state;
+}
+
 QJsonObject exportPlayer(AbstractGame *game,
                          Player *player,
                          bool isPerspective,
@@ -353,6 +397,10 @@ QJsonObject exportPlayer(AbstractGame *game,
     }
     if (!resources.otherCounters.isEmpty()) {
         obj.insert("other_counters", resources.otherCounters);
+    }
+
+    if (isPerspective) {
+        obj.insert("computed_state", computePlayerState(player));
     }
 
     QJsonObject zones;
@@ -555,13 +603,12 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
 
     const MulliganPhaseInfo mulligan = analyzeMulliganPhase(messageHistoryText);
 
-    // Prompt engineering for GPT 5.2 / Azure OpenAI Responses API.
-    // Structured to elicit careful reasoning about mulligan decisions and play sequencing.
     QString prompt;
-    prompt += "You are an expert Magic: The Gathering cEDH (competitive Commander) goldfishing coach.\n";
-    prompt += "Analyze the Cockatrice game state JSON below and provide strategic guidance for the perspective player.\n";
+    prompt += "You are a cEDH Logic Engine and Coach.\n";
+    prompt += "Your goal is to find the optimal line of play given a Cockatrice game state.\n";
     prompt += "This is GOLDFISHING (solitaire practice), but we will use realistic cEDH assumptions to approximate a real pod.\n";
-    prompt += "Assume opponents exist, interaction is likely, and sequencing a protected win is preferable to an unprotected win.\n\n";
+    prompt += "Assume opponents exist, interaction is likely, and sequencing a protected win is preferable to an unprotected win.\n";
+    prompt += "You must adhere to strict Rules Enforcement Level (REL).\n\n";
 
     prompt += "=== GOLDFISH ASSUMPTIONS (Use for Evaluation) ===\n";
     prompt += "When giving recommendations, apply these simplifying assumptions unless the JSON contradicts them:\n";
@@ -571,28 +618,24 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     prompt += "- Rhystic Study: assume it draws 3 cards on T1, 2 cards on T2-T4, and 1 card each turn after that while it remains on the battlefield.\n";
     prompt += "- Ragavan, Nimble Pilferer and Praetor's Grasp: assume they can generate value because opponents have similar wincons and staples as our deck (treat the opponent pool as a typical cEDH pod).\n\n";
 
-    prompt += "=== CRITICAL: CARD KNOWLEDGE ===\n";
-    prompt += "If you encounter a card you do not recognize or are uncertain about, explicitly say:\n";
-    prompt += "  \"I am not familiar with [Card Name]. Please provide its Oracle text.\"\n";
-    prompt += "DO NOT guess or hallucinate card abilities. Accuracy is paramount.\n\n";
+    prompt += "=== CRITICAL RULES & LOGIC ===\n";
+    prompt += "1. **The Ledger is Law:** You cannot cast a spell unless you explicitly identify the untapped source in the \"Current State\" ledger.\n";
+    prompt += "2. **Color Strictness:** You cannot spend {C} (Colorless) or {R} (Red) to pay for {U} (Blue) pips. Treat \"Mana Cost\" in JSON as authoritative.\n";
+    prompt += "3. **State Updates:** Every action updates the ledger. You must track the mana pool AND hand contents step-by-step. If a card is discarded, it is gone.\n";
+    prompt += "4. **Action Validity:** If you cannot pay for a spell, you cannot cast it. If no win line is mathematically possible, do not hallucinate one. Suggest the best defensive setup instead.\n";
+    prompt += "5. **Counter Verification:** Do not assume a permanent has a counter (e.g., 'luck counter') unless it is explicitly listed in the 'counters' array of that card object.\n";
+    prompt += "6. **Land Drops:** Check `turn_context.land_drop_made`. If false, you should generally play a land. If you play a Fetch Land, you MUST look at the 'Library' zone and specify exactly which land to fetch.\n";
+    prompt += "7. **Card Knowledge:** If you do not recognize a card, ask for Oracle text. Do not guess.\n";
+    prompt += "8. **Tutor Specificity:** If you cast a Tutor, you MUST specify exactly what card you are finding and WHY. Do not say 'find a wincon'. Say 'find Underworld Breach'.\n";
+    prompt += "9. **Cost Consequences:** If you Sacrifice a permanent as a cost (e.g., Diabolic Intent), immediately update your mental state to reflect that it is gone. Check if this disables other cards (e.g., Fierce Guardianship requires a Commander).\n\n";
 
-    prompt += "=== CRITICAL: MANA COSTS / COLORS ===\n";
-    prompt += "The JSON includes card database fields (e.g., \"Mana Cost\", \"Type\", \"Text\").\n";
-    prompt += "- Treat the provided \"Mana Cost\" as authoritative; DO NOT invent or modify mana costs or color identities.\n";
-    prompt += "- Use the provided mana symbols exactly for mana math and color requirements.\n";
-    prompt += "- Symbol reminder: U = Blue, B = Black, R = Red, G = Green, W = White.\n\n";
-
-    prompt += "=== RULES / LEGALITY ===\n";
-    prompt += "Do not recommend illegal actions. Respect timing restrictions, costs, and rules text.\n";
-    prompt += "If the legality depends on missing info (e.g., commander tax, cards' Oracle text, whether a permanent is untapped, etc.), call it out and ask.\n";
-    prompt += "Only use information present in the JSON; do not assume extra cards, mana sources, or effects not shown.\n\n";
-
-    prompt += "=== GAME LOG INTERPRETATION ===\n";
-    prompt += "The JSON includes message_history_text (the in-game log).\n";
-    prompt += "- \"Player N's turn.\" marks a turn boundary.\n";
-    prompt += "- \"Player N puts <Card> into play from their hand.\" indicates a land drop.\n";
-    prompt += "- Startup lines (game started, phase labels, looking at sideboard, setting counters, shuffles/draws) are mulligan context.\n";
-    prompt += "- If only startup/mulligan lines exist, treat this as the MULLIGAN DECISION phase.\n\n";
+    prompt += "=== INPUT DATA EXPLANATION ===\n";
+    prompt += "- \"tapped\": true means the permanent provides NO MANA.\n";
+    prompt += "- \"floating_mana\": The mana currently in the pool before any actions are taken.\n";
+    prompt += "- \"Hand\": Cards available to cast.\n";
+    prompt += "- \"Graveyard\": Cards available for Escape/Flashback/Recursion.\n";
+    prompt += "- \"Computed_State\": Pre-calculated counts of treasures and untapped lands/artifacts to help you avoid hallucinations.\n";
+    prompt += "- \"message_history_text\": The in-game log. \"Player N's turn\" marks turn boundaries. Startup lines are mulligan context.\n\n";
 
     prompt += "=== COMMANDER MULLIGAN RULES (Goldfishing) ===\n";
     prompt += "- 1 free mulligan (draw 7, keep 7).\n";
@@ -603,51 +646,168 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
                   .arg(mulligan.newHandEvents)
                   .arg(mulligan.keepSize);
 
-    prompt += "=== MODE SELECTION (IMPORTANT) ===\n";
+    prompt += "=== MODE SELECTION ===\n";
     prompt += "First, decide which mode applies and state it explicitly:\n";
     prompt += "- **MULLIGAN MODE** if we're still deciding to keep an opening hand (even if the heuristic is wrong).\n";
     prompt += "- **PLAY MODE** if the game has progressed and we are sequencing plays.\n";
     prompt += "Use the heuristic plus sanity checks (battlefield empty, only startup actions in log, etc.).\n\n";
 
     prompt += "=== MULLIGAN MODE: EVALUATION FRAMEWORK ===\n";
-    prompt += "Evaluate the hand using these criteria (priority order for cEDH goldfishing):\n";
-    prompt += "1) Mana sources (lands + fast mana/rituals): do you have at least one reliable way to cast spells?\n";
-    prompt += "2) Early acceleration: can you do something meaningful on T1-T2?\n";
-    prompt += "3) Card advantage/selection: can you find missing pieces (tutors/draw/wheels)?\n";
-    prompt += "4) Win access: do you have a clear win attempt or tutors toward one?\n";
-    prompt += "5) Commander synergy: does the hand leverage commanders as part of the plan?\n";
-    prompt += "Then decide KEEP or MULLIGAN and explain what the hand is working toward (mana development, card advantage, win attempt, etc.).\n";
-    prompt += "\n";
-    prompt += "IMPORTANT: The JSON field mulligan.keep_size is NOT optional.\n";
-    prompt += "- If you KEEP, you must choose EXACTLY keep_size cards from the current Hand to keep, and the other (7-keep_size) cards are put on the bottom.\n";
-    prompt += "- As keep_size gets smaller, be less picky: at keep_size<=4, prioritize ANY functional development (making land drops, casting an engine/tutor/accelerant) over an ideal win-attempt hand.\n\n";
+    prompt += "Adopt the following philosophy verbatim:\n\n";
+    prompt += "1. The Core Philosophy: \"Default to Mull\"\n";
+    prompt += "In 60-card formats, you keep unless the hand is unplayable. In cEDH, Mulligan is the default action.\n";
+    prompt += "- The 3-to-1 Problem: You must outperform three other starting hands. A \"fair\" hand will almost never be the best of four.\n";
+    prompt += "- No Partial Credit: Having the \"second best\" game is the same as losing. You don't win by \"not losing\"; you win by doing something powerful.\n";
+    prompt += "- The Power Gap: The disparity between your best 10 cards and your 50th best is massive. Mull to find the top 10%.\n\n";
+
+    prompt += "2. Leverage Your \"Safety Nets\"\n";
+    prompt += "- The First One is Free: Use the free mulligan aggressively to see 14 cards.\n";
+    prompt += "- The Command Zone Offset: A mulligan to 5 still gives you access to 6 or 7 cards with commanders.\n";
+    prompt += "- The Turn 1 Draw: Even at 4 cards, you'll have 7-8 cards available on T1.\n\n";
+
+    prompt += "3. The Hierarchy of Keeping (Ranked)\n";
+    prompt += "I. Truly Broken Things (The \"Final Destination\")\n";
+    prompt += "   If your hand breaks parity (e.g., T1/T2 Rhystic/Remora, fast Ad Naus), KEEP regardless of deficiencies.\n";
+    prompt += "II. Development (The \"Engine\")\n";
+    prompt += "   Prioritize Mana Development. The \"Pants\" Rule: If you have spells but no fast mana, MULLIGAN.\n";
+    prompt += "--- THE BREAKPOINT: Hands below this line are usually Mulligans on 7 ---\n";
+    prompt += "III. Interaction (The \"Shared Responsibility\")\n";
+    prompt += "   Don't be the \"Police\". If you have interaction but no engine, MULLIGAN.\n";
+    prompt += "IV. Card Advantage (The \"Trap\")\n";
+    prompt += "   Slow engines (Sylvan Library) without board development are a trap. MULLIGAN.\n";
+    prompt += "V. Non-Functional-Hand Avoidance (The \"Fear\")\n";
+    prompt += "   Do not keep a hand just because it \"works\" (lands + spells). Better to mull to a glass cannon 4 than a mediocre 7.\n\n";
+
+    prompt += "4. Practical Steps\n";
+    prompt += "- Look for a Coherent Plan: Can this hand win or establish a dominant engine by Turn 3?\n";
+    prompt += "- The \"Greedy\" Test: Ask, \"Is a random 5-card hand from my deck more likely to win than this 7?\" If yes, throw it back.\n";
+    prompt += "Then decide KEEP or MULLIGAN and explain what the hand is working toward.\n";
+    prompt += "IMPORTANT: If you KEEP, you must choose EXACTLY keep_size cards to keep.\n\n";
 
     prompt += "=== PLAY MODE: SEQUENCING FRAMEWORK ===\n";
     prompt += "Determine the optimal line using:\n";
-    prompt += "1) Immediate goal this turn (develop mana / draw / tutor / win).\n";
-    prompt += "2) Resource assessment (lands, rocks, floating mana, storm, hand).\n";
+    prompt += "1) Immediate goal: Do something POWERFUL. Don't just 'not lose'.\n";
+    prompt += "2) Resource assessment: Prioritize Mana Development (the primary bottleneck).\n";
     prompt += "3) Sequencing: order matters (land drop, rocks, draw, tutors).\n";
-    prompt += "4) Win attempt: if a win line exists, write it step-by-step with exact mana accounting.\n";
+    prompt += "4) Win attempt: if a win line exists, write it step-by-step with exact mana accounting. If using a tutor, specify the target.\n";
     prompt += "5) If no win line now: best setup for next turn.\n\n";
 
-    prompt += "=== OUTPUT FORMAT (USE ONLY THE CHOSEN MODE) ===\n";
+    prompt += "=== FEW-SHOT EXAMPLES (LEARN FROM THESE) ===\n";
+    prompt += "Study these examples to understand how to track the ledger and avoid hallucinations.\n\n";
+
+    prompt += "### Example 1: The \"Color Screw\" (Respect Pips)\n";
+    prompt += "**Input:** { \"Floating\": \"{C}{C}\", \"Hand\": [\"Demonic Tutor\"], \"Board\": [\"Swamp (Untapped)\"] }\n";
+    prompt += "**Correct Output:**\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "* Untapped Sources: Swamp ({B}).\n";
+    prompt += "* Floating Mana: {C}{C}.\n";
+    prompt += "**Phase 2: The Line**\n";
+    prompt += "> **Step 1: Cast Demonic Tutor**\n";
+    prompt += "> * Cost: {1}{B}\n";
+    prompt += "> * Payment: Pay {1} with {C}. Pay {B} with Swamp.\n";
+    prompt += "> * Mana Change: {C}{C} -> {C}\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "We have enough mana. Cast Demonic Tutor.\n\n";
+
+    prompt += "### Example 2: The \"Empty Tank\" (Stop when empty)\n";
+    prompt += "**Input:** { \"Floating\": \"{0}\", \"Hand\": [\"Underworld Breach\", \"Lion's Eye Diamond\"], \"Board\": [] }\n";
+    prompt += "**Correct Output:**\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "* Untapped Sources: None.\n";
+    prompt += "**Phase 2: The Line**\n";
+    prompt += "> **Step 1: Cast Lion's Eye Diamond**\n";
+    prompt += "> * Cost Paid: {0}\n";
+    prompt += "> * New Pool: {0}\n";
+    prompt += "> **Step 2: Cast Underworld Breach**\n";
+    prompt += "> * Cost: {1}{R}\n";
+    prompt += "> * Current Pool: {0}\n";
+    prompt += "> * RESULT: Impossible to cast Breach. Stop.\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "Cannot cast win condition. Pass turn.\n\n";
+
+    prompt += "### Example 3: The \"Ritual Math\" (Ledger Updates)\n";
+    prompt += "**Input:** { \"Floating\": \"{0}\", \"Hand\": [\"Dark Ritual\", \"Ad Nauseam\"], \"Board\": [\"Underground Sea (Untapped)\", \"Chrome Mox (Black, Untapped)\"] }\n";
+    prompt += "**Correct Output:**\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "* Untapped Sources: Underground Sea ({U}/{B}), Chrome Mox ({B}).\n";
+    prompt += "**Phase 2: The Line**\n";
+    prompt += "> **Step 1: Cast Dark Ritual**\n";
+    prompt += "> * Source Used: Underground Sea ({B})\n";
+    prompt += "> * Cost Paid: {B}\n";
+    prompt += "> * Effect: Add {B}{B}{B}\n";
+    prompt += "> * Mana Change: {0} -> {B}{B}{B}\n";
+    prompt += "> **Step 2: Cast Ad Nauseam**\n";
+    prompt += "> * Cost: {3}{B}{B}\n";
+    prompt += "> * Current Pool: {B}{B}{B} + Chrome Mox ({B}) = {B}{B}{B}{B}\n";
+    prompt += "> * Missing: {1} generic mana.\n";
+    prompt += "> * RESULT: Cannot cast Ad Nauseam.\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "We are 1 mana short. Do not cast Dark Ritual.\n\n";
+
+    prompt += "### Example 4: The \"Wrong Color\" (Color Failure)\n";
+    prompt += "**Input:** { \"Floating\": \"{R}\", \"Hand\": [\"Swan Song\"], \"Board\": [] }\n";
+    prompt += "**Correct Output:**\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "* Untapped Sources: None.\n";
+    prompt += "* Floating Mana: {R}.\n";
+    prompt += "**Phase 2: The Line**\n";
+    prompt += "> **Step 1: Cast Swan Song**\n";
+    prompt += "> * Cost: {U}\n";
+    prompt += "> * Current Pool: {R}\n";
+    prompt += "> * RESULT: Failure. Cannot pay {U} with {R}.\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "Wrong colors. Pass turn.\n\n";
+
+    prompt += "### Example 5: The \"Gone Forever\" (Discard Costs)\n";
+    prompt += "**Input:** { \"Floating\": \"{0}\", \"Hand\": [\"Mox Diamond\", \"Ancient Tomb\"], \"Board\": [] }\n";
+    prompt += "**Correct Output:**\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "* Untapped Sources: None.\n";
+    prompt += "**Phase 2: The Line**\n";
+    prompt += "> **Step 1: Cast Mox Diamond**\n";
+    prompt += "> * Cost Paid: {0}, Discard Ancient Tomb\n";
+    prompt += "> * Hand Update: Removed Mox Diamond, Ancient Tomb\n";
+    prompt += "> * Effect: Mox Diamond enters.\n";
+    prompt += "> **Step 2: Play Ancient Tomb**\n";
+    prompt += "> * RESULT: Failure. Ancient Tomb is in Graveyard.\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "Cannot play Tomb after discarding it.\n\n";
+
+    prompt += "=== REQUIRED OUTPUT FORMAT (USE ONLY THE CHOSEN MODE) ===\n";
+    
     prompt += "If **MULLIGAN MODE**:\n";
     prompt += "- Hand analysis: mana sources; acceleration; card advantage; win access; commander synergy\n";
     prompt += "- Decision: KEEP or MULLIGAN\n";
-    prompt += "- Reasoning: careful explanation of why, and what the plan is working toward\n";
     prompt += "- If KEEP: explicitly list KEEP (exactly keep_size cards) and BOTTOM (the other cards)\n";
-    prompt += "- If KEEP: first 1-2 turns plan (with mana math)\n";
-    prompt += "- If MULLIGAN: what to look for next hand\n";
-    prompt += "- Alternatives: only if there is a plausible keep line\n";
-    prompt += "- Key risks / missing info\n\n";
-    prompt += "If **PLAY MODE**:\n";
-    prompt += "- Situation assessment (turn/phase/resources/hand/board)\n";
-    prompt += "- Recommended line: numbered steps with mana spent/remaining\n";
-    prompt += "- Goal: what the line accomplishes\n";
-    prompt += "- Alternative line(s) and why\n";
-    prompt += "- Key risks / missing info\n\n";
+    prompt += "- **Hypothetical Line (Chain-of-State)**:\n";
+    prompt += "  Simulate the first 1-2 turns (or failure to act) using the exact 'Phase 2: The Line' format below.\n";
+    prompt += "  Show the mana math to prove the hand works or fails.\n";
+    prompt += "- Reasoning: Explain why the simulated line justifies the decision.\n\n";
 
-    prompt += "=== GAME STATE JSON ===\n";
+    prompt += "If **PLAY MODE** (Use Chain-of-State):\n";
+    prompt += "**Phase 1: State Audit**\n";
+    prompt += "List *only* the untapped mana sources and their production capabilities.\n";
+    prompt += "List the current floating mana.\n\n";
+    prompt += "**Phase 2: The Line (Step-by-Step)**\n";
+    prompt += "For every step, follow this exact format:\n";
+    prompt += "> **Step [N]: [Action Name]**\n";
+    prompt += "> *   **Source Used:** [Name of Land/Rock] (or \"Floating Mana\")\n";
+    prompt += "> *   **Cost Paid:** [Specific Symbols, e.g., {1}{U}]\n";
+    prompt += "> *   **Mana Change:** [Old Pool] -> [New Pool]\n";
+    prompt += "> *   **Hand Update:** [List cards removed (played/discarded)]\n";
+    prompt += "> *   **Effect:** [Description]\n\n";
+    prompt += "**Phase 3: Strategic Summary**\n";
+    prompt += "Explain why this line was chosen and what the backup plan is if it fails.\n\n";
+
+    prompt += "=== FINAL VERIFICATION STEP ===\n";
+    prompt += "After you write your \"Recommended Line,\" you must act as a Judge.\n";
+    prompt += "Read your own steps backwards.\n";
+    prompt += "1. Did you spend mana that wasn't in the pool?\n";
+    prompt += "2. Did you use a Tapped land?\n";
+    prompt += "3. Did you use Colorless mana for a Colored pip?\n";
+    prompt += "If you find an error, write: **\"CORRECTION: The previous line is invalid due to [Reason]. The correct play is...\"**\n\n";
+
+    prompt += "### GAME STATE JSON\n";
     prompt += json;
 
     return prompt;
