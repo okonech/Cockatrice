@@ -162,6 +162,7 @@ QJsonObject exportCard(const CardItem *card)
     }
 
     obj.insert("tapped", card->getTapped());
+    obj.insert("doesnt_untap", card->getDoesntUntap());
 
     if (!card->getAnnotation().isEmpty()) {
         obj.insert("annotation", card->getAnnotation());
@@ -692,7 +693,74 @@ QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
     prompt += "4) Win attempt: if a win line exists, write it step-by-step with exact mana accounting. If using a tutor, specify the target.\n";
     prompt += "5) If no win line now: best setup for next turn.\n\n";
 
-    prompt += "=== FEW-SHOT EXAMPLES (LEARN FROM THESE) ===\n";
+    prompt += "=== ROGSI STRATEGY PRIMER ===\n";
+    prompt += "You are piloting RogSi (Rograkh/Silas). This is a Storm Combo deck, not just a Turbo Ad Naus deck.\n";
+    prompt += "Goal: Win within the first 3 turns. If your hand cannot do that, consider mulliganing.\n\n";
+
+    prompt += "**1. General Strategy**\n";
+    prompt += "   - Don't tunnel vision on Ad Nauseam. We play high-impact cards (Necropotence, Bolas's Citadel, etc.).\n";
+    prompt += "   - Speed is key. Rograkh enables fast mana (Mox Amber, Springleaf Drum, Culling the Weak).\n";
+    prompt += "   - Develop intuition for 'windows' to win. Be resilient, fast, and calculated.\n\n";
+
+    prompt += "**2. Thassa's Oracle Combo (Primary Win)**\n";
+    prompt += "   - Cast Thassa's Oracle. With trigger on stack, cast Demonic Consultation or Tainted Pact to exile library.\n";
+    prompt += "   - Tip: Cast Oracle first to bait counters. If it resolves, then cast the exile spell.\n\n";
+
+    prompt += "**3. Underworld Breach Combo (Secondary Win)**\n";
+    prompt += "   - Assemble Breach + Brain Freeze + LED/Lotus Petal.\n";
+    prompt += "   - Freeze yourself to fill grave, escape LED for mana, repeat until library is empty, then Oracle.\n";
+    prompt += "   - If Oracle is gone, Freeze opponents or use Mnemonic Betrayal/Praetor's Grasp.\n\n";
+
+    prompt += "**4. Turbo Nauz & Final Fortune**\n";
+    prompt += "   - We run Final Fortune/Last Chance/Warrior's Oath to untap mana rocks (Talismans) after a main phase Ad Naus.\n";
+    prompt += "   - Use life aggressively. Ad Naus is an Instant - cast it in windows.\n\n";
+
+    prompt += "**5. Piecing It Together (Wheels)**\n";
+    prompt += "   - Wheels (Timetwister, Wheel of Fortune/Misfortune, Windfall) are NOT last resorts. They are fuel.\n";
+    prompt += "   - Mull aggressively for fast mana, then Wheel to refuel and fill graveyard for Breach.\n\n";
+
+    prompt += "=== ROGSI HAND ANALYSIS EXAMPLES ===\n";
+    prompt += "### Hand 1 (Seat 1): Keep\n";
+    prompt += "**Cards:** Paradise Mantle, Misty Rainforest, Mana Vault, Defense Grid, Demonic Tutor, Ad Nauseam, Chain of Vapor\n";
+    prompt += "**Reasoning:** Likely T2 Ad Naus protected by Grid. Rograkh + Paradise Mantle = Birds of Paradise. T1 Vault. T2 Tutor for Culling the Weak -> Ad Naus.\n\n";
+
+    prompt += "### Hand 2 (Seat 2): Mulligan\n";
+    prompt += "**Cards:** Mana Confluence, Lotus Petal, City of Traitors, Mystical Tutor, Thassa's Oracle, Transmute Artifact, Simian Spirit Guide\n";
+    prompt += "**Reasoning:** Trap hand. Looks like T2 Ad Naus but has NO protection and dead cards if stopped. No interaction. RogSi is not Belcher.\n\n";
+
+    prompt += "### Hand 3 (Seat 3): Mulligan\n";
+    prompt += "**Cards:** Underground Sea, City of Brass, Talisman of Dominance, Bolas's Citadel, Ragavan, Wheel of Misfortune, Wheel of Fortune\n";
+    prompt += "**Reasoning:** Too slow. 'Maybe decent' isn't enough. Seat 3 needs to be faster than the decks ahead. Shuffle for impact.\n\n";
+
+    prompt += "### Hand 4 (Seat 4): Mulligan\n";
+    prompt += "**Cards:** Verdant Catacombs, Flooded Strand, Pact of Negation, Swan Song, Mystical Tutor, Moonsnare Prototype, Mnemonic Betrayal\n";
+    prompt += "**Reasoning:** The 'Responsible Seat 4' trap. Interaction with no engine is bad. Don't be the table police.\n\n";
+
+    prompt += "### Hand 5 (Seat 1): Mulligan\n";
+    prompt += "**Cards:** Mox Opal, Mox Amber, Dark Ritual, Cabal Ritual, Thassa's Oracle, Borne Upon a Wind, Simian Spirit Guide\n";
+    prompt += "**Reasoning:** Non-functional. Mox Opal has no metalcraft. Choked on colored mana.\n\n";
+
+    prompt += "### Hand 6 (Seat 2): Keep\n";
+    prompt += "**Cards:** Blood Crypt, Paradise Mantle, Command Tower, Praetor's Grasp, Ad Nauseam, Swan Song, Dockside Extortionist\n";
+    prompt += "**Reasoning:** Variable but strong. Rograkh + Mantle fixes mana. Dockside on T2 fuels Ad Naus with Swan Song backup.\n\n";
+
+    prompt += "### Hand 7 (Seat 3): Keep\n";
+    prompt += "**Cards:** City of Brass, Ancient Tomb, Gemstone Mine, Springleaf Drum, Necrodominance, Rhystic Study, Deflecting Swat\n";
+    prompt += "**Reasoning:** F*&$ Yeah! T1 Rograkh + Drum. T2 Rhystic/Necrodominance with Swat backup. Grinds out Stax/Midrange easily.\n\n";
+
+    prompt += "### Hand 8 (Seat 4): Keep\n";
+    prompt += "**Cards:** Mox Amber, LED, Polluted Delta, Talisman of Dominance, Necropotence, Timetwister, Jeska's Will\n";
+    prompt += "**Reasoning:** Flexible. T1 Rograkh + LED + Talisman. T2 choice of Jeska's Will, Twister, or Necro. LED enables plays.\n\n";
+
+    prompt += "### Hand 9 (Seat 1): Mulligan\n";
+    prompt += "**Cards:** Mox Opal, Ancient Tomb, Steam Vents, Scalding Tarn, Misty Rainforest, Defense Grid, Final Fortune\n";
+    prompt += "**Reasoning:** Long-shot. T1 Grid is okay, but no payoff and no metalcraft for Opal. Needs too many runner-runner draws.\n\n";
+
+    prompt += "### Hand 10 (Seat 2): Keep\n";
+    prompt += "**Cards:** Mox Diamond, City of Brass, Mana Crypt, Talisman of Indulgence, Vampiric Tutor, Flusterstorm, Dress Down\n";
+    prompt += "**Reasoning:** Broken start. 4-5 mana T1. Vamp Tutor for Ad Naus (if land on top) or Wheel. Dress Down/Flusterstorm interaction.\n\n";
+
+    prompt += "=== MECHANICS FEW-SHOT EXAMPLES (LEARN FROM THESE) ===\n";
     prompt += "Study these examples to understand how to track the ledger and avoid hallucinations.\n\n";
 
     prompt += "### Example 1: The \"Color Screw\" (Respect Pips)\n";
