@@ -397,18 +397,19 @@ void RemoteClient::readData()
         }
 
         ServerMessage newServerMessage;
-        bool ok = newServerMessage.ParseFromArray(inputBuffer.data(), messageLength);
+        if (!newServerMessage.ParseFromArray(inputBuffer.data(), messageLength)) {
+            qCWarning(RemoteClientLog) << "Failed to parse TCP server message of length" << messageLength;
+            inputBuffer.remove(0, messageLength);
+            messageInProgress = false;
+            doDisconnectFromServer();
+            return;
+        }
 
         inputBuffer.remove(0, messageLength);
         messageInProgress = false;
 
-        if (ok) {
-            qCDebug(RemoteClientLog).noquote() << "IN" << getSafeDebugString(newServerMessage);
-
-            processProtocolItem(newServerMessage);
-        } else {
-            qCDebug(RemoteClientLog) << "parsing error!";
-        }
+        qCDebug(RemoteClientLog).noquote() << "IN" << getSafeDebugString(newServerMessage);
+        processProtocolItem(newServerMessage);
 
         if (getStatus() == StatusDisconnecting) { // use thread-safe getter
             doDisconnectFromServer();
@@ -420,13 +421,14 @@ void RemoteClient::websocketMessageReceived(const QByteArray &message)
 {
     lastDataReceived = timeRunning;
     ServerMessage newServerMessage;
-    if (newServerMessage.ParseFromArray(message.data(), message.length())) {
-        qCDebug(RemoteClientLog).noquote() << "IN" << getSafeDebugString(newServerMessage);
-
-        processProtocolItem(newServerMessage);
-    } else {
-        qCDebug(RemoteClientLog) << "parsing error!";
+    if (!newServerMessage.ParseFromArray(message.data(), message.length())) {
+        qCWarning(RemoteClientLog) << "Failed to parse websocket server message of length" << message.length();
+        doDisconnectFromServer();
+        return;
     }
+
+    qCDebug(RemoteClientLog).noquote() << "IN" << getSafeDebugString(newServerMessage);
+    processProtocolItem(newServerMessage);
 }
 
 void RemoteClient::sendCommandContainer(const CommandContainer &cont)
@@ -440,27 +442,25 @@ void RemoteClient::sendCommandContainer(const CommandContainer &cont)
     qCDebug(RemoteClientLog).noquote() << "OUT" << getSafeDebugString(cont);
 
     QByteArray buf;
-    bool ok;
     if (usingWebSocket) {
         buf.resize(size);
-        ok = cont.SerializeToArray(buf.data(), size);
-        if (ok) {
-            websocket->sendBinaryMessage(buf);
+        if (!cont.SerializeToArray(buf.data(), size)) {
+            qCWarning(RemoteClientLog) << "Failed to serialize websocket command container of size" << size;
+            return;
         }
+        websocket->sendBinaryMessage(buf);
     } else {
         buf.resize(size + 4);
-        ok = cont.SerializeToArray(buf.data() + 4, size);
-        if (ok) {
-            buf.data()[3] = (unsigned char)size;
-            buf.data()[2] = (unsigned char)(size >> 8);
-            buf.data()[1] = (unsigned char)(size >> 16);
-            buf.data()[0] = (unsigned char)(size >> 24);
-
-            socket->write(buf);
+        if (!cont.SerializeToArray(buf.data() + 4, size)) {
+            qCWarning(RemoteClientLog) << "Failed to serialize TCP command container of size" << size;
+            return;
         }
-    }
-    if (!ok) {
-        qCDebug(RemoteClientLog) << "transmit error!";
+        buf.data()[3] = (unsigned char)size;
+        buf.data()[2] = (unsigned char)(size >> 8);
+        buf.data()[1] = (unsigned char)(size >> 16);
+        buf.data()[0] = (unsigned char)(size >> 24);
+
+        socket->write(buf);
     }
 }
 

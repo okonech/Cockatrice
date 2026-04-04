@@ -269,11 +269,14 @@ void TabReplays::actOpenLocalReplay()
         f.close();
 
         GameReplay *replay = new GameReplay;
-        if (replay->ParseFromArray(_data.data(), _data.size())) {
-            emit openReplay(replay);
-        } else {
+        if (!replay->ParseFromArray(_data.data(), _data.size())) {
             qCWarning(TabReplaysLog) << "could not parse replay!";
+            delete replay;
+            QMessageBox::critical(this, tr("Error"), tr("Failed to load replay file."));
+            continue;
         }
+
+        emit openReplay(replay);
     }
 }
 
@@ -387,12 +390,14 @@ void TabReplays::openRemoteReplayFinished(const Response &r)
 
     const Response_ReplayDownload &resp = r.GetExtension(Response_ReplayDownload::ext);
     GameReplay *replay = new GameReplay;
-    if (replay->ParseFromString(resp.replay_data())) {
-
-        emit openReplay(replay);
-    } else {
+    if (!replay->ParseFromString(resp.replay_data())) {
         qCWarning(TabReplaysLog) << "could not parse remote replay!";
+        delete replay;
+        QMessageBox::critical(this, tr("Error"), tr("Failed to load replay data from the server."));
+        return;
     }
+
+    emit openReplay(replay);
 }
 
 void TabReplays::actDownload()

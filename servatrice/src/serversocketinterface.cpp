@@ -2273,16 +2273,17 @@ void TcpServerSocketInterface::flushOutputQueue()
         unsigned int size = static_cast<unsigned int>(item.ByteSize());
 #endif
         buf.resize(size + 4);
-        if (item.SerializeToArray(buf.data() + 4, size)) {
-            buf.data()[3] = (unsigned char)size;
-            buf.data()[2] = (unsigned char)(size >> 8);
-            buf.data()[1] = (unsigned char)(size >> 16);
-            buf.data()[0] = (unsigned char)(size >> 24);
-            // In case socket->write() calls catchSocketError(), the mutex must not be locked during this call.
-            writeToSocket(buf);
-        } else {
-            qCWarning(TcpServerSocketInterfaceLog) << "serialisation error!";
+        if (!item.SerializeToArray(buf.data() + 4, size)) {
+            qCWarning(TcpServerSocketInterfaceLog) << "Failed to serialize TCP server message of size" << size;
+            locker.relock();
+            continue;
         }
+        buf.data()[3] = (unsigned char)size;
+        buf.data()[2] = (unsigned char)(size >> 8);
+        buf.data()[1] = (unsigned char)(size >> 16);
+        buf.data()[0] = (unsigned char)(size >> 24);
+        // In case socket->write() calls catchSocketError(), the mutex must not be locked during this call.
+        writeToSocket(buf);
 
         totalBytes += size + 4;
         locker.relock();
@@ -2317,9 +2318,9 @@ void TcpServerSocketInterface::readClient()
         }
 
         CommandContainer newCommandContainer;
-        bool ok;
+        bool parsed = false;
         try {
-            ok = newCommandContainer.ParseFromArray(inputBuffer.data(), messageLength);
+            parsed = newCommandContainer.ParseFromArray(inputBuffer.data(), messageLength);
         } catch (std::exception &e) {
             qCWarning(TcpServerSocketInterfaceLog) << "Caught std::exception in" << __FILE__ << __LINE__ <<
 #ifdef _MSC_VER // Visual Studio
@@ -2345,19 +2346,20 @@ void TcpServerSocketInterface::readClient()
         inputBuffer.remove(0, messageLength);
         messageInProgress = false;
 
-        if (ok) {
-            // dirty hack to make v13 client display the correct error message
-            if (handshakeStarted) {
-                processCommandContainer(newCommandContainer);
-            } else if (!newCommandContainer.has_cmd_id()) {
-                handshakeStarted = true;
-                if (!initTcpSession()) {
-                    prepareDestroy();
-                }
+        if (!parsed) {
+            qCWarning(TcpServerSocketInterfaceLog)
+                << "Failed to parse TCP command container from" << getAddress() << "with length" << messageLength;
+            continue;
+        }
+
+        // dirty hack to make v13 client display the correct error message
+        if (handshakeStarted) {
+            processCommandContainer(newCommandContainer);
+        } else if (!newCommandContainer.has_cmd_id()) {
+            handshakeStarted = true;
+            if (!initTcpSession()) {
+                prepareDestroy();
             }
-            // end of hack
-        } else {
-            qCWarning(TcpServerSocketInterfaceLog) << "parsing error!";
         }
 
     } while (!inputBuffer.isEmpty());
@@ -2491,12 +2493,14 @@ void WebsocketServerSocketInterface::flushOutputQueue()
         unsigned int size = static_cast<unsigned int>(item.ByteSize());
 #endif
         buf.resize(size);
-        if (item.SerializeToArray(buf.data(), size)) {
-            // In case socket->write() calls catchSocketError(), the mutex must not be locked during this call.
-            writeToSocket(buf);
-        } else {
-            qCWarning(TcpServerSocketInterfaceLog) << "serialisation error!";
+        if (!item.SerializeToArray(buf.data(), size)) {
+            qCWarning(WebsocketServerSocketInterfaceLog)
+                << "Failed to serialize websocket server message of size" << size;
+            locker.relock();
+            continue;
         }
+        // In case socket->write() calls catchSocketError(), the mutex must not be locked during this call.
+        writeToSocket(buf);
 
         totalBytes += size;
         locker.relock();
@@ -2512,9 +2516,9 @@ void WebsocketServerSocketInterface::binaryMessageReceived(const QByteArray &mes
     servatrice->incRxBytes(message.size());
 
     CommandContainer newCommandContainer;
-    bool ok;
+    bool parsed = false;
     try {
-        ok = newCommandContainer.ParseFromArray(message.data(), message.size());
+        parsed = newCommandContainer.ParseFromArray(message.data(), message.size());
     } catch (std::exception &e) {
         qCWarning(WebsocketServerSocketInterfaceLog) << "Caught std::exception in" << __FILE__ << __LINE__ <<
 #ifdef _MSC_VER // Visual Studio
@@ -2538,11 +2542,13 @@ void WebsocketServerSocketInterface::binaryMessageReceived(const QByteArray &mes
                                                      << "Message coming from:" << getAddress();
     }
 
-    if (ok) {
-        processCommandContainer(newCommandContainer);
-    } else {
-        qCWarning(WebsocketServerSocketInterfaceLog) << "parsing error!";
+    if (!parsed) {
+        qCWarning(WebsocketServerSocketInterfaceLog)
+            << "Failed to parse websocket command container from" << getAddress() << "with length" << message.size();
+        return;
     }
+
+    processCommandContainer(newCommandContainer);
 }
 
 bool AbstractServerSocketInterface::isPasswordLongEnough(const int passwordLength)

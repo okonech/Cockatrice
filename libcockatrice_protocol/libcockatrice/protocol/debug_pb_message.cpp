@@ -102,10 +102,8 @@ QString getSafeDebugString(const ::google::protobuf::Message &message)
 #endif // GOOGLE_PROTOBUF_VERSION > 3004000
 
     std::string debug_string;
-    bool ok = printer.PrintToString(message, &debug_string);
-    if (ok) {
-        return QString::number(size) + " bytes " + QString::fromStdString(debug_string);
-    } else {
-        return "[could not convert message to string]";
+    if (!printer.PrintToString(message, &debug_string)) {
+        debug_string = "<failed to render protobuf debug string>";
     }
+    return QString::number(size) + " bytes " + QString::fromStdString(debug_string);
 }

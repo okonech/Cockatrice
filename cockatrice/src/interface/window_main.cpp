@@ -192,11 +192,15 @@ void MainWindow::actWatchReplay()
     file.close();
 
     replay = new GameReplay;
-    if (replay->ParseFromArray(buf.data(), buf.size())) {
-        tabSupervisor->openReplay(replay);
-    } else {
+    if (!replay->ParseFromArray(buf.data(), buf.size())) {
         qCWarning(MainWindowLog) << "failed to parse replay!";
+        delete replay;
+        replay = nullptr;
+        QMessageBox::critical(this, tr("Error"), tr("Failed to load replay file."));
+        return;
     }
+
+    tabSupervisor->openReplay(replay);
 }
 
 void MainWindow::localGameEnded()

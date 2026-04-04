@@ -254,15 +254,16 @@ void IslInterface::readClient()
         }
 
         IslMessage newMessage;
-        bool ok = newMessage.ParseFromArray(inputBuffer.data(), messageLength);
+        if (!newMessage.ParseFromArray(inputBuffer.data(), messageLength)) {
+            qCWarning(IslInterfaceLog) << "Failed to parse message of length" << messageLength;
+            inputBuffer.remove(0, messageLength);
+            messageInProgress = false;
+            return;
+        }
         inputBuffer.remove(0, messageLength);
         messageInProgress = false;
 
-        if (ok) {
-            processMessage(newMessage);
-        } else {
-            qCWarning(IslInterfaceLog) << "parsing error!";
-        }
+        processMessage(newMessage);
     } while (!inputBuffer.isEmpty());
 }
 
@@ -287,7 +288,7 @@ void IslInterface::transmitMessage(const IslMessage &item)
 #endif
     buf.resize(size + 4);
     if (!item.SerializeToArray(buf.data() + 4, size)) {
-        qCWarning(IslInterfaceLog) << "transmit error!";
+    qCWarning(IslInterfaceLog) << "Failed to serialize message of size" << size;
         return;
     }
     buf.data()[3] = (unsigned char)size;
