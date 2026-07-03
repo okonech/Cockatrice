@@ -1,13 +1,14 @@
 #include "ai_coach_state_exporter.h"
 
 #include "../abstract_game.h"
-#include "../board/translate_counter_name.h"
+#include "../../game_graphics/board/translate_counter_name.h"
+#include "../../game_graphics/board/card_item.h"
+#include "../board/counter_state.h"
 #include "../game_state.h"
-#include "../player/player.h"
 #include "../player/player_info.h"
+#include "../player/player_logic.h"
 #include "../player/player_manager.h"
-#include "../zones/logic/card_zone_logic.h"
-#include "../board/card_item.h"
+#include "../zones/card_zone_logic.h"
 
 #include <libcockatrice/card/card_info.h>
 #include <libcockatrice/card/database/card_database_manager.h>
@@ -278,13 +279,13 @@ struct ExportedPlayerResources
     int storm = 0;
 };
 
-ExportedPlayerResources exportPlayerResources(Player *player)
+ExportedPlayerResources exportPlayerResources(PlayerLogic *player)
 {
     ExportedPlayerResources out;
 
-    const QMap<int, AbstractCounter *> counters = player->getCounters();
+    const QMap<int, CounterState *> counters = player->getCounters();
     for (auto it = counters.cbegin(); it != counters.cend(); ++it) {
-        const AbstractCounter *counter = it.value();
+        const CounterState *counter = it.value();
         if (!counter) {
             continue;
         }
@@ -340,7 +341,7 @@ ExportedPlayerResources exportPlayerResources(Player *player)
     return out;
 }
 
-QJsonObject computePlayerState(Player *player)
+QJsonObject computePlayerState(PlayerLogic *player)
 {
     QJsonObject state;
     int treasureCount = 0;
@@ -377,7 +378,7 @@ QJsonObject computePlayerState(Player *player)
 }
 
 QJsonObject exportPlayer(AbstractGame *game,
-                         Player *player,
+                         PlayerLogic *player,
                          bool isPerspective,
                          const AiCoachStateExporter::ZoneCardOverrides &zoneCardOverrides)
 {
@@ -522,14 +523,14 @@ QJsonObject exportTurnContext(const QString &messageHistoryText)
 } // namespace
 
 QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
-                                              Player *perspectivePlayer,
+                                              PlayerLogic *perspectivePlayer,
                                               const QString &messageHistoryText)
 {
     return exportStateJson(game, perspectivePlayer, messageHistoryText, ZoneCardOverrides());
 }
 
 QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
-                                              Player *perspectivePlayer,
+                                              PlayerLogic *perspectivePlayer,
                                               const QString &messageHistoryText,
                                               const ZoneCardOverrides &zoneCardOverrides)
 {
@@ -574,7 +575,7 @@ QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
     if (game && game->getPlayerManager()) {
         const auto &playerMap = game->getPlayerManager()->getPlayers();
         for (auto it = playerMap.cbegin(); it != playerMap.cend(); ++it) {
-            Player *p = it.value();
+            PlayerLogic *p = it.value();
             if (!p) {
                 continue;
             }
@@ -589,14 +590,14 @@ QString AiCoachStateExporter::exportStateJson(AbstractGame *game,
 }
 
 QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
-                                              Player *perspectivePlayer,
+                                              PlayerLogic *perspectivePlayer,
                                               const QString &messageHistoryText)
 {
     return buildPromptText(game, perspectivePlayer, messageHistoryText, ZoneCardOverrides());
 }
 
 QString AiCoachStateExporter::buildPromptText(AbstractGame *game,
-                                              Player *perspectivePlayer,
+                                              PlayerLogic *perspectivePlayer,
                                               const QString &messageHistoryText,
                                               const ZoneCardOverrides &zoneCardOverrides)
 {

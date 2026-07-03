@@ -6,7 +6,7 @@
 #include <QString>
 
 class AbstractGame;
-class Player;
+class PlayerLogic;
 
 class AiCoachStateExporter
 {
@@ -21,22 +21,22 @@ public:
     using ZoneCardOverrides = QMap<QString, QList<DumpedCard>>;
 
     // Produces a stable, machine-readable JSON snapshot of state.
-    static QString exportStateJson(AbstractGame *game, Player *perspectivePlayer, const QString &messageHistoryText);
+    static QString exportStateJson(AbstractGame *game, PlayerLogic *perspectivePlayer, const QString &messageHistoryText);
 
     // Like exportStateJson, but allows overriding hidden zone card lists (e.g. deck/sideboard) with
     // data returned by Command_DumpZone / Response_DumpZone.
     static QString exportStateJson(AbstractGame *game,
-                                  Player *perspectivePlayer,
+                                  PlayerLogic *perspectivePlayer,
                                   const QString &messageHistoryText,
                                   const ZoneCardOverrides &zoneCardOverrides);
 
     // Produces the full prompt text that will be sent to the LLM.
     static QString buildPromptText(AbstractGame *game,
-                                   Player *perspectivePlayer,
+                                   PlayerLogic *perspectivePlayer,
                                    const QString &messageHistoryText);
 
     static QString buildPromptText(AbstractGame *game,
-                                   Player *perspectivePlayer,
+                                   PlayerLogic *perspectivePlayer,
                                    const QString &messageHistoryText,
                                    const ZoneCardOverrides &zoneCardOverrides);
 };

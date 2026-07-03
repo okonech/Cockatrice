@@ -2,6 +2,7 @@
 
 #include "../../../client/settings/cache_settings.h"
 #include "../game/game.h"
+#include "../game/player/player_actions.h"
 #include "../game/player/player_logic.h"
 #include "../game/replay.h"
 #include "../game_graphics/board/arrow_item.h"
@@ -546,7 +547,7 @@ void TabGame::actAiCoachRecommend()
         return;
     }
 
-    Player *perspectivePlayer = game->getPlayerManager()->getActiveLocalPlayer(game->getGameState()->getActivePlayer());
+    PlayerLogic *perspectivePlayer = game->getPlayerManager()->getActiveLocalPlayer(game->getGameState()->getActivePlayer());
     if (!perspectivePlayer) {
         perspectivePlayer = game->getPlayerManager()->getPlayer(game->getPlayerManager()->getLocalPlayerId());
     }
@@ -557,7 +558,7 @@ void TabGame::actAiCoachRecommend()
 
     const QString messageHistoryText = messageLog ? messageLog->toPlainText() : QString();
 
-    QPointer<Player> perspectivePlayerPtr(perspectivePlayer);
+    QPointer<PlayerLogic> perspectivePlayerPtr(perspectivePlayer);
 
     const QString appDataDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     const QString logFilePath = appDataDir.isEmpty() ? QString() : QDir(appDataDir).filePath("ai_coach_last_request.log");
